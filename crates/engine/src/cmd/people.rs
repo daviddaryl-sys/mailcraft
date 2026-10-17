@@ -158,6 +158,21 @@ fn new(s: &mut Session, v: &Value) -> CmdResult {
     if c.name().is_empty() {
         return Err(bad("a contact needs a name, a company or an e-mail address"));
     }
+    // With one connected writable address book, new contacts belong there. Imports and
+    // pre-existing local contacts remain local; an explicit account can choose another book.
+    let books: Vec<_> = s
+        .mailbox
+        .dav_collections
+        .iter()
+        .filter(|b| b.contacts && !b.read_only && s.mailbox.account(b.account).is_some_and(|a| !a.dav_url.is_empty()))
+        .filter(|b| p::id(v, "account").is_none_or(|id| id == b.account))
+        .collect();
+    if let [book] = books.as_slice() {
+        c.origin = mailcraft_model::Origin { account: book.account, id: book.href.clone(), ..Default::default() };
+        c.uid = super::remote::new_token(s.mailbox.contacts.len() as u64, s.now().unsigned_abs());
+    } else if p::id(v, "account").is_some() {
+        return Err(bad("Choose one writable DAV address book"));
+    }
     let id = s.mailbox.add_contact(c);
     s.sel.contact = Some(id);
     Ok(json!({"id": id}))

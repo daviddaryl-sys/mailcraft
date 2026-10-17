@@ -38,7 +38,7 @@ pub fn specs() -> Vec<CommandSpec> {
 pub const GRAPH_MAIL_OFF: &str =
     "Microsoft accounts kept in step through Microsoft Graph are being tested: start MailCraft with MAILCRAFT_GRAPH_MAIL=1 to add one";
 
-const ACCOUNT: &str = r#"{"email": string, "displayName"?: string, "name"?: string, "username"?: string, "incoming"?: {"host": string, "port"?: number, "security"?: "tls"|"starttls"|"none"} | null, "outgoing"?: same | null, "auth"?: "password"|"oauth2" (oauth2: sign in on the provider's page), "provider"?: "microsoft", "clientId"?: string, "tenant"?: string, "directory"?: "organisation"|"personal" (which kind of Microsoft account signs in, when the sign-in said), "kind"?: "imap"|"local"|"microsoft" (microsoft: kept in step through Microsoft Graph, no mail servers; only while MAILCRAFT_GRAPH_MAIL=1 is set)}"#;
+const ACCOUNT: &str = r#"{"email": string, "displayName"?: string, "name"?: string, "username"?: string, "davUrl"?: string (optional HTTPS CalDAV/CardDAV discovery URL; same password), "incoming"?: {"host": string, "port"?: number, "security"?: "tls"|"starttls"|"none"} | null, "outgoing"?: same | null, "auth"?: "password"|"oauth2" (oauth2: sign in on the provider's page), "provider"?: "microsoft", "clientId"?: string, "tenant"?: string, "directory"?: "organisation"|"personal" (which kind of Microsoft account signs in, when the sign-in said), "kind"?: "imap"|"local"|"microsoft" (microsoft: kept in step through Microsoft Graph, no mail servers; only while MAILCRAFT_GRAPH_MAIL=1 is set)}"#;
 
 fn has_server(s: &Session) -> Option<&'static str> {
     if s.mailbox.accounts.iter().any(|a| a.kind.has_server()) {
@@ -194,7 +194,25 @@ fn apply_fields(a: &mut Account, v: &Value, graph_mail: bool) -> Result<(), CmdE
     if let Some(o) = server(v, "outgoing")? {
         a.outgoing = o;
     }
+    if let Some(url) = p::str(v, "davUrl") {
+        let url = url.trim();
+        if !url.is_empty()
+            && (!url.starts_with("https://")
+                || url.len() > 2000
+                || url.contains(['@', '?', '#', '\r', '\n', '\\'])
+                || !url.bytes().all(|b| b.is_ascii_graphic()))
+        {
+            return Err(bad("davUrl must be an HTTPS discovery URL without credentials, query or fragment"));
+        }
+        if a.dav_url != url && !a.dav_url.is_empty() {
+            return Err(bad("Disconnect the existing DAV account before changing its server"));
+        }
+        a.dav_url = url.to_string();
+    }
     sign_in(a, v)?;
+    if !a.dav_url.is_empty() && a.oauth.is_some() {
+        return Err(bad("DAV currently requires password sign-in"));
+    }
     // A Microsoft account kept in step through Graph (R3): asked for by name, and only while the
     // switch for testing is on; one that is that already stays it.
     let microsoft = match p::str(v, "kind").map(|k| k.trim().to_ascii_lowercase()) {
@@ -276,7 +294,7 @@ fn list(s: &mut Session, _: &Value) -> CmdResult {
         .accounts
         .iter()
         .map(|a| {
-            json!({"id": a.id, "name": a.name, "email": a.email, "displayName": a.display_name, "kind": a.kind, "username": a.username, "incoming": a.incoming, "outgoing": a.outgoing, "signature": a.signature, "replySignature": a.reply_signature(), "auth": if a.oauth.is_some() { "oauth2" } else { "password" }, "oauth": a.oauth})
+            json!({"id": a.id, "name": a.name, "email": a.email, "displayName": a.display_name, "kind": a.kind, "username": a.username, "davUrl": a.dav_url, "incoming": a.incoming, "outgoing": a.outgoing, "signature": a.signature, "replySignature": a.reply_signature(), "auth": if a.oauth.is_some() { "oauth2" } else { "password" }, "oauth": a.oauth})
         })
         .collect();
     Ok(json!({"accounts": accounts, "signatures": s.mailbox.signatures}))

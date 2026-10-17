@@ -22,6 +22,7 @@ pub mod calendar_view;
 pub mod chrome;
 pub mod compose;
 pub mod control;
+mod dav_sync;
 pub mod dialogs;
 pub mod favorites_sync;
 pub mod files;
@@ -90,6 +91,8 @@ pub struct Services {
     /// background thread: send the Outbox (no "authenticated SMTP" switch stands in its way) and
     /// bring the calendar and the contacts down. Absent in the browser.
     pub graph: Option<Box<dyn Fn(GraphRequest) -> Receiver<GraphResult>>>,
+    /// CalDAV/CardDAV jobs, isolated from Graph and mail delivery.
+    pub dav: Option<Box<dyn Fn(mailcraft_model::dav::Request) -> Receiver<mailcraft_model::dav::Download>>>,
     /// Desktop: ask the DNS for a domain's mail exchangers on a background thread (best first),
     /// so account setup can tell whose servers an address at a company's own domain uses. Only
     /// the domain is given, never the mailbox name.
@@ -504,6 +507,12 @@ pub const UI_COMMANDS: &[(&str, &str, &str, &str)] = &[
         "Send / Receive",
         "{} — gives up the sign-in, or the administrator's approval, that the browser is open for",
     ),
+    (
+        "ui.davSync",
+        "Sync Calendar and Contacts",
+        "Send / Receive",
+        r#"{"account"?: number, "readOnly"?: bool} — discovers CalDAV/CardDAV and syncs contacts and personal appointments; conflicts and meetings are retained without overwriting or sending invitations"#,
+    ),
     ("ui.cancelSync", "Cancel Send/Receive", "Send / Receive", "{}"),
     (
         "ui.connectMicrosoft",
@@ -691,6 +700,7 @@ pub struct MailApp {
     /// What Graph is doing for an account before its mail is synchronised: the account, whether
     /// nobody asked, whether the calendar and contacts were asked for, and the answer to come.
     graph_rx: Option<(Id, bool, bool, Receiver<GraphResult>)>,
+    dav: dav_sync::DavSync,
     /// When each account's calendar and contacts were last brought down (milliseconds).
     graph_checked: std::collections::HashMap<Id, f64>,
     /// Accounts whose owner hasn't allowed Graph yet ("Connect calendar and contacts").
@@ -805,6 +815,7 @@ impl MailApp {
             tokens: Default::default(),
             graph_tokens: Default::default(),
             graph_rx: None,
+            dav: Default::default(),
             graph_checked: Default::default(),
             graph_consent_needed: Default::default(),
             calendar: Default::default(),
@@ -1094,6 +1105,7 @@ impl MailApp {
                 Ok(json!({"text": text}))
             }
             "ui.sync" => self.start_sync(p),
+            "ui.davSync" => self.start_dav(p),
             "ui.checkCalendar" => self.check_calendar(p),
             "ui.microsoftClientId" => {
                 let id = s("value").unwrap_or_default().trim();
@@ -1999,6 +2011,7 @@ impl MailApp {
         self.auto_sync();
         // The calendar by itself, between Send/Receive runs ([`calendar_sync`]).
         self.calendar_tick(ctx);
+        self.dav_tick(ctx);
         reminders::tick(self, ctx);
         if std::mem::take(&mut self.offer_setup) && self.dialog.is_none() && self.needs_setup() {
             self.dialog = dialogs::Dialog::open("account", self, &json!({}));

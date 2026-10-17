@@ -8,6 +8,7 @@
 
 pub mod catalog;
 pub mod cmd;
+pub mod dav;
 pub mod io;
 pub mod list;
 pub mod sample;

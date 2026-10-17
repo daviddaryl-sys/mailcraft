@@ -6,6 +6,7 @@ pub mod calendar_extra;
 pub mod calendar_settings;
 pub mod category;
 pub mod compose;
+pub mod dav;
 pub mod edit;
 #[cfg(test)]
 mod favorites_tests;
@@ -55,6 +56,7 @@ pub fn registry() -> Registry {
     v.extend(rules::specs());
     v.extend(category::specs());
     v.extend(account::specs());
+    v.extend(dav::specs());
     v.extend(signature::specs());
     v.extend(graph_mail::specs());
     v.extend(remote::specs());

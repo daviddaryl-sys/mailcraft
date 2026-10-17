@@ -247,6 +247,16 @@ pub(crate) fn who(account: &Account) -> &str {
 /// [`note_changed`].)
 pub(crate) fn changeable(mailbox: &Mailbox, origin: &Origin, what: &str) -> Result<(), CmdError> {
     let Some(account) = keeper(mailbox, origin) else { return Ok(()) };
+    if what == "contact" && !account.dav_url.is_empty() {
+        let writable = mailbox
+            .dav_resources
+            .iter()
+            .find(|r| r.account == account.id && r.href == origin.id)
+            .and_then(|r| mailbox.dav_collections.iter().find(|c| c.account == account.id && c.href == r.collection))
+            .is_some_and(|c| !c.read_only);
+        let new = mailbox.dav_collections.iter().any(|c| c.account == account.id && c.href == origin.id && !c.read_only);
+        return if writable || new { Ok(()) } else { Err(fail("This DAV address book is read-only")) };
+    }
     let who = who(account);
     Err(fail(format!("This {what} is kept by the server of {who}. Changes made here are not sent back yet, so it can't be changed or deleted here.")))
 }
@@ -735,10 +745,11 @@ fn server_start(event: &Event, offset_at: &dyn Fn(Timestamp) -> i32) -> Timestam
 /// the mailbox still has the account: where an event made here goes to be on the server too.
 pub(crate) fn server_calendar(mailbox: &Mailbox) -> Option<&Calendar> {
     // The default account's first.
-    mailbox
-        .accounts
-        .iter()
-        .find_map(|account| mailbox.calendars.iter().find(|calendar| calendar.origin.account == account.id && calendar.origin.id.is_empty()))
+    mailbox.accounts.iter().find_map(|account| {
+        mailbox.calendars.iter().find(|calendar| {
+            calendar.origin.account == account.id && (calendar.origin.id.is_empty() || (!account.dav_url.is_empty() && !calendar.read_only))
+        })
+    })
 }
 
 /// The main calendar of an account's server in the mailbox ([`server_calendar`]), by its id here.
@@ -777,7 +788,7 @@ pub(crate) fn room_for_change(mailbox: &Mailbox) -> Result<(), CmdError> {
 
 /// A mark for a new event ([`EventChange::token`]), in the shape of a GUID: no two the same,
 /// whenever and wherever they were made.
-fn new_token(event: Id, salt: u64) -> String {
+pub(crate) fn new_token(event: Id, salt: u64) -> String {
     static MADE: AtomicU64 = AtomicU64::new(0);
     let mix = |mut x: u64| {
         x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -787,7 +798,14 @@ fn new_token(event: Id, salt: u64) -> String {
     };
     let nth = MADE.fetch_add(1, Ordering::Relaxed);
     // The clock as the machine has it, not as a test may have stopped it.
-    let a = mix(mailcraft_time::now().unsigned_abs() ^ mix(event) ^ nth.rotate_left(40));
+    #[cfg(not(target_arch = "wasm32"))]
+    let precision = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().wrapping_mul(1_000_000_000).wrapping_add(u64::from(d.subsec_nanos())))
+        .unwrap_or(0);
+    #[cfg(target_arch = "wasm32")]
+    let precision = 0;
+    let a = mix(mailcraft_time::now().unsigned_abs() ^ precision ^ mix(event) ^ nth.rotate_left(40));
     let b = mix(a ^ salt.rotate_left(17) ^ nth);
     format!("{:08x}-{:04x}-4{:03x}-a{:03x}-{:012x}", a >> 32, (a >> 16) & 0xFFFF, a & 0xFFF, (b >> 48) & 0xFFF, b & 0xFFFF_FFFF_FFFF)
 }
@@ -812,6 +830,18 @@ pub(crate) fn note_created(s: &mut Session, id: Id) -> Result<(), CmdError> {
     writable(mailbox, event.calendar)?;
     let account = mailbox.calendar(event.calendar).and_then(|calendar| keeper(mailbox, &calendar.origin)).map(|account| account.id);
     let Some(account) = account else { return Ok(()) };
+    if mailbox.account(account).is_some_and(|a| !a.dav_url.is_empty()) {
+        if !event.attendees.is_empty() || event.organizer.is_some() {
+            return Err(fail("Use Despres Connect for DAV meetings; invitations are not sent from MailCraft"));
+        }
+        let uid = new_token(id, s.rev() ^ s.now().unsigned_abs());
+        let event = s.mailbox.event_mut(id)?;
+        event.origin = Origin { account, ..Default::default() };
+        if event.uid.is_empty() {
+            event.uid = uid;
+        }
+        return Ok(());
+    }
     room_for_change(mailbox)?;
     let token = new_token(id, s.rev() ^ s.now().unsigned_abs().rotate_left(32));
     let mailbox = &mut s.mailbox;
@@ -827,6 +857,18 @@ pub(crate) fn note_created(s: &mut Session, id: Id) -> Result<(), CmdError> {
 pub(crate) fn note_changed(mailbox: &mut Mailbox, before: &Event, offset_at: &dyn Fn(Timestamp) -> i32) -> Result<(), CmdError> {
     let Some(now) = mailbox.event(before.id).cloned() else { return Ok(()) };
     let Some(account) = keeper(mailbox, &now.origin).map(|account| account.id) else { return Ok(()) };
+    if mailbox.account(account).is_some_and(|a| !a.dav_url.is_empty()) {
+        if now.calendar != before.calendar {
+            return Err(fail("Move DAV appointments between calendars in Despres Connect"));
+        }
+        if before.organizer.is_some() || !before.attendees.is_empty() || now.organizer.is_some() || !now.attendees.is_empty() {
+            return Err(fail("Edit DAV meetings in Despres Connect to control invitation mail"));
+        }
+        if mailbox.dav_resources.iter().any(|r| r.href == before.origin.id && r.account == account && r.events.len() != 1) {
+            return Err(fail("Edit detached recurring DAV appointments in Despres Connect"));
+        }
+        return Ok(());
+    }
     // One the server doesn't have yet is sent as it is when it goes.
     if now.origin.id.is_empty() {
         return Ok(());
@@ -867,6 +909,15 @@ pub(crate) fn note_changed(mailbox: &mut Mailbox, before: &Event, offset_at: &dy
 /// delete it too; one the server never had needs no telling.
 pub(crate) fn note_deleted(mailbox: &mut Mailbox, before: &Event) -> Result<(), CmdError> {
     let Some(account) = keeper(mailbox, &before.origin).map(|account| account.id) else { return Ok(()) };
+    if mailbox.account(account).is_some_and(|a| !a.dav_url.is_empty()) {
+        if before.organizer.is_some() || !before.attendees.is_empty() {
+            return Err(fail("Delete DAV meetings in Despres Connect to control cancellation mail"));
+        }
+        if mailbox.dav_resources.iter().any(|r| r.href == before.origin.id && r.account == account && r.events.len() != 1) {
+            return Err(fail("Delete detached recurring DAV appointments in Despres Connect"));
+        }
+        return Ok(());
+    }
     if before.origin.id.is_empty() {
         // One that was on its way into another calendar ([`note_moved`]): the original, which
         // the server still has, is what is to be deleted now.
@@ -1727,6 +1778,9 @@ pub(crate) fn approve_mail(mailbox: &mut Mailbox, account: Id, event: Id, remote
 /// that makes, for a meeting.
 pub(crate) fn note_occurrence_changed(s: &mut Session, series: &Event, day: Date, id: Id, was: Event, send: bool) -> Result<(), CmdError> {
     let Some(account) = keeper(&s.mailbox, &series.origin).map(|account| account.id) else { return Ok(()) };
+    if s.mailbox.account(account).is_some_and(|a| !a.dav_url.is_empty()) {
+        return Err(fail("Use Despres Connect for meeting responses, single recurring occurrences and calendar moves"));
+    }
     room_for_change(&s.mailbox)?;
     let occurrence = occurrence_instant(series, day, &offset_of(s));
     s.mailbox.event_changes.push(EventChange {
@@ -1753,6 +1807,9 @@ pub(crate) fn note_occurrence_gone(
     comment: &str,
 ) -> Result<(), CmdError> {
     let Some(account) = keeper(&s.mailbox, &series.origin).map(|account| account.id) else { return Ok(()) };
+    if s.mailbox.account(account).is_some_and(|a| !a.dav_url.is_empty()) {
+        return Err(fail("Use Despres Connect for meeting responses, single recurring occurrences and calendar moves"));
+    }
     room_for_change(&s.mailbox)?;
     let occurrence = occurrence_instant(series, day, &offset_of(s));
     s.mailbox.event_changes.retain(|change| {
@@ -1777,6 +1834,9 @@ pub(crate) fn note_occurrence_gone(
 /// organizer when `send`.
 pub(crate) fn note_responded(mailbox: &mut Mailbox, before: &Event, response: Response, send: bool, comment: &str) -> Result<(), CmdError> {
     let Some(account) = keeper(mailbox, &before.origin).map(|account| account.id) else { return Ok(()) };
+    if mailbox.account(account).is_some_and(|a| !a.dav_url.is_empty()) {
+        return Err(fail("Use Despres Connect for meeting responses, single recurring occurrences and calendar moves"));
+    }
     if before.origin.id.is_empty() {
         return Ok(());
     }
@@ -1856,6 +1916,9 @@ pub(crate) fn note_forward(
 /// [`move_not_seen`]). Until then a download leaves the original out.
 pub(crate) fn note_moved(s: &mut Session, id: Id, before: &Event) -> Result<(), CmdError> {
     let account = before.origin.account;
+    if s.mailbox.account(account).is_some_and(|a| !a.dav_url.is_empty()) {
+        return Err(fail("Use Despres Connect for meeting responses, single recurring occurrences and calendar moves"));
+    }
     room_for_change(&s.mailbox)?;
     let token = new_token(id, s.rev() ^ s.now().unsigned_abs().rotate_left(16));
     let event = s.mailbox.event_mut(id)?;
@@ -3355,6 +3418,8 @@ pub fn forget(s: &mut Session, account: Id) -> CmdResult {
         let _ = mailbox.remove_contact(*id);
     }
     // What was waiting to be sent to that server has nowhere to go.
+    mailbox.dav_resources.retain(|r| r.account != account);
+    mailbox.dav_collections.retain(|c| c.account != account);
     let unsent = mailbox.event_changes.len();
     mailbox.event_changes.retain(|change| change.account != account);
     let unsent = unsent - mailbox.event_changes.len();

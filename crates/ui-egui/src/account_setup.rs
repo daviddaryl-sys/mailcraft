@@ -361,6 +361,7 @@ pub struct AccountSetup {
     /// Set for an account that signs in on its provider's page instead of with a password.
     oauth: Option<OAuth>,
     username: String,
+    dav_url: String,
     incoming: ServerFields,
     outgoing: ServerFields,
     /// The servers are shown on the password page.
@@ -455,6 +456,7 @@ impl AccountSetup {
             note: String::new(),
             oauth: None,
             username: String::new(),
+            dav_url: String::new(),
             incoming: ServerFields::default(),
             outgoing: ServerFields::default(),
             settings_open: false,
@@ -511,6 +513,7 @@ impl AccountSetup {
         w.email = line(&a.email, LINE);
         w.name = line(&a.display_name, LINE);
         w.username = line(&a.username, LINE);
+        w.dav_url = a.dav_url.clone();
         w.incoming = ServerFields::of(a.incoming.as_ref());
         w.outgoing = ServerFields::of(a.outgoing.as_ref());
         if let Some(oauth) = &a.oauth {
@@ -560,6 +563,9 @@ impl AccountSetup {
         }
         let name = if self.name.trim().is_empty() { line(fallback, LINE) } else { self.name.trim().to_string() };
         let mut m = object(json!({"email": email, "displayName": name, "username": self.login(email)}));
+        if !self.dav_url.trim().is_empty() {
+            m.insert("davUrl".into(), json!(self.dav_url.trim()));
+        }
         for (key, server) in [("incoming", &self.incoming), ("outgoing", &self.outgoing)] {
             if let Some(v) = server.value() {
                 m.insert(key.into(), v);
@@ -622,6 +628,7 @@ impl AccountSetup {
             incoming: self.incoming.server(),
             outgoing: self.outgoing.server(),
             username: self.login(email),
+            dav_url: self.dav_url.trim().to_string(),
             oauth: self.oauth.clone(),
             ..Default::default()
         })
@@ -640,6 +647,7 @@ impl AccountSetup {
         let mut m = object(json!({
             "displayName": self.name.trim(),
             "username": self.username.trim(),
+            "davUrl": self.dav_url.trim(),
             "incoming": self.incoming.value(),
             "outgoing": self.outgoing.value(),
         }));
@@ -1403,6 +1411,15 @@ impl AccountSetup {
     /// The user name and the two servers.
     fn settings(&mut self, ui: &mut Ui, pass: &mut Pass) {
         field(ui, pass, "username", tl!("User name"), &mut self.username, tl!("Usually the whole address"), LINE);
+        field(
+            ui,
+            pass,
+            "davUrl",
+            tl!("Calendar and contacts (DAV URL)"),
+            &mut self.dav_url,
+            tl!("https://your-server/dav/ — uses the same sign-in"),
+            2000,
+        );
         server_row(ui, pass, tl!("Incoming mail (IMAP)"), "incoming", &mut self.incoming, "imap.example.org", (993, 143));
         server_row(ui, pass, tl!("Outgoing mail (SMTP)"), "outgoing", &mut self.outgoing, "smtp.example.org", (465, 587));
     }

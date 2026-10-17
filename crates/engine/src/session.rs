@@ -770,6 +770,27 @@ impl Session {
         self.redo.clear();
     }
 
+    /// A DAV synchronization settles DAV undo steps, while preserving unrelated mail history.
+    /// Their old mailbox snapshots must not turn newly downloaded items into remote deletions.
+    pub(crate) fn settle_dav_history(&mut self, account: Id, before: &Mailbox) {
+        fn settle(entries: &mut Vec<Undo>, before: &Mailbox, latest: &Mailbox, account: Id) {
+            let mut following = before.clone();
+            let mut kept = Vec::new();
+            for mut undo in std::mem::take(entries).into_iter().rev() {
+                let changed = crate::dav::different(&undo.mailbox, &following, account);
+                following = undo.mailbox.clone();
+                if !changed {
+                    crate::dav::rebase_snapshot(&mut undo.mailbox, latest, account);
+                    kept.push(undo);
+                }
+            }
+            kept.reverse();
+            *entries = kept;
+        }
+        settle(&mut self.history, before, &self.mailbox, account);
+        settle(&mut self.redo, before, &self.mailbox, account);
+    }
+
     fn swap(&mut self, u: Undo) -> Undo {
         let cur = Undo {
             label: u.label,

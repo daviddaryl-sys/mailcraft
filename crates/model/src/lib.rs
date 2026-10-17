@@ -9,6 +9,7 @@
 mod address;
 mod calendar;
 mod contact;
+pub mod dav;
 mod mailbox;
 mod message;
 pub mod provider;

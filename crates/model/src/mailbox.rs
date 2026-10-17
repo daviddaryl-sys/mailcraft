@@ -201,6 +201,9 @@ pub struct Account {
     /// Login name; the password is never stored in the mailbox.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub username: String,
+    /// Optional CalDAV/CardDAV discovery URL; uses this account's password.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub dav_url: String,
     /// The signature new messages start with (a [`Signature`] name; empty for none).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub signature: String,
@@ -463,6 +466,11 @@ pub struct Mailbox {
     pub folders: Vec<Folder>,
     pub messages: BTreeMap<Id, Arc<Message>>,
     pub contacts: BTreeMap<Id, Arc<Contact>>,
+    /// DAV ETags and lossless server documents used for conditional two-way sync.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dav_resources: Vec<crate::dav::Resource>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dav_collections: Vec<crate::dav::Collection>,
     pub calendars: Vec<Calendar>,
     pub events: BTreeMap<Id, Arc<Event>>,
     pub tasks: BTreeMap<Id, Arc<Task>>,
@@ -508,6 +516,8 @@ impl Default for Mailbox {
             folders: Vec::new(),
             messages: BTreeMap::new(),
             contacts: BTreeMap::new(),
+            dav_resources: Vec::new(),
+            dav_collections: Vec::new(),
             calendars: Vec::new(),
             events: BTreeMap::new(),
             tasks: BTreeMap::new(),
@@ -539,6 +549,13 @@ impl Mailbox {
         let mut mb = Mailbox::default();
         mb.add_account(Account { name: email.to_string(), email: email.to_string(), display_name: display_name.to_string(), ..Default::default() });
         mb
+    }
+
+    /// Reserve an identity when incorporating already assigned server items into a snapshot.
+    pub fn reserve_id(&mut self, id: Id) {
+        if id <= MAX_ID {
+            self.next_id = self.next_id.max(id.saturating_add(1));
+        }
     }
 
     pub fn alloc_id(&mut self) -> Id {
@@ -603,6 +620,8 @@ impl Mailbox {
         self.event_checks.retain(|check| check.account != id);
         self.queued.retain(|queued| queued.account() != id);
         self.favorites_from_server.retain(|list| list.account != id);
+        self.dav_resources.retain(|r| r.account != id);
+        self.dav_collections.retain(|c| c.account != id);
         Ok(())
     }
 

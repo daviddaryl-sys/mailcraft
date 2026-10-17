@@ -755,6 +755,7 @@ fn services(file_dialog: file_dialogs::Hook, ctx: egui::Context, kept_pictures: 
     let pictures_ctx = ctx.clone();
     let pictures_kept = kept_pictures.clone();
     let busy_ctx = ctx.clone();
+    let dav_ctx = ctx.clone();
     let check_ctx = ctx.clone();
     let approval_ctx = ctx.clone();
     let (sync_ctx, sign_in_ctx, graph_ctx, mx_ctx, test_ctx) = (ctx.clone(), ctx.clone(), ctx.clone(), ctx.clone(), ctx);
@@ -790,6 +791,7 @@ fn services(file_dialog: file_dialogs::Hook, ctx: egui::Context, kept_pictures: 
             background(&sign_in_ctx, "sign-in", move || sign_in(&ctx, request))
         })),
         graph: Some(Box::new(move |request| background(&graph_ctx, "microsoft graph", move || graph(request)))),
+        dav: Some(Box::new(move |request| background(&dav_ctx, "calendar and contacts", move || mailcraft_net::dav::sync(request)))),
         lookup_mx: Some(Box::new(move |domain| {
             background(&mx_ctx, "mail exchangers", move || mailcraft_net::lookup_mx(&domain).map_err(|e| e.to_string()))
         })),
