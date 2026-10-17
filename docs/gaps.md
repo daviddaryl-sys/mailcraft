@@ -1,6 +1,11 @@
 # Where MailCraft falls short of Outlook
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (gap 2 and rough edges: behind the switch for testing, a Microsoft account's folders kept in step through Microsoft Graph, R3.1; gap 4: sign-ins remembered on Linux and FreeBSD through the Secret Service; Exchange Web Services removed: one way of reading Outlook's Favorites; gap 7: the compose body is rich text underneath and goes out as HTML; the rich-text editor, R4.2) · **Target:** Microsoft Outlook (Microsoft 365)
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-17 · **Change:** minor (local AUTO.1: unified Despres Connect account setup; domain-only SRV discovery) · **Target:** Microsoft Outlook (Microsoft 365)
+
+Local Despres Connect build (AUTO.1, 2026-10-17): email-first setup carries the shared DAV URL
+with mail settings, checks all three services with one credential, and starts their downloads.
+See [automatic-setup.md](automatic-setup.md) for supported discovery and remaining provider limits.
+
 
 Since 2026-10-14 the order of the work is [`docs/plans/roadmap-reset.md`](plans/roadmap-reset.md);
 this list stays the record of what falls short. The work list. One entry per shortfall, ranked by how much it stops an Outlook user from switching
@@ -66,3 +71,5 @@ done similar work in this code base.
 | 2026-10-15 | minor | Gap 7: the message being written is rich text underneath, with its own undo and the formatting commands (R4.1), sent as HTML with a plain-text part, and pasted HTML reduced to the set (R4.4); a reply's HTML original carried below as it came (R4.3) |
 | 2026-10-15 | minor | Gap 7: the rich-text editor (R4.2): the owner's text is written as it will look, with the formatting keys in the body only, and the carried original is shown as the reading pane shows it |
 | 2026-10-15 | minor | Gap 2 and rough edges: behind the switch for testing, a Microsoft account's folders are kept in step through Microsoft Graph by server id (R3.1); `Mail.ReadWrite` is asked for that account only |
+
+| 2026-10-17 | minor | AUTO.1 local account setup; explicit DAV/provider limits |

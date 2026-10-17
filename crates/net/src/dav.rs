@@ -342,6 +342,17 @@ fn recover_created(resource: &mut Resource, mailbox: &Mailbox) -> Option<Resourc
     }
     Some(snapshot)
 }
+/// Authenticate and discover collections without reading items or making any changes. Used
+/// by Add Account after mail authentication, with the same in-memory credential.
+pub fn check_account(account: &mailcraft_model::Account, password: &str) -> Result<(), String> {
+    let username = if account.username.is_empty() { &account.email } else { &account.username };
+    let client = Client::new(&account.dav_url, username, password)?;
+    let collections = client.discover(account.id)?;
+    if !collections.iter().any(|c| c.contacts) || !collections.iter().any(|c| !c.contacts) {
+        return Err("The sign-in did not expose both a calendar and an address book. Check the DAV URL or continue with mail only.".into());
+    }
+    Ok(())
+}
 /// Run against the snapshot, returning checkpoints only for verified server representations.
 pub fn sync(request: Request) -> Download {
     let mut result = Download {

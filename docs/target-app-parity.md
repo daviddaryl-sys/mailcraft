@@ -1,6 +1,11 @@
 # MailCraft vs Outlook: the assessment
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-14 · **Change:** minor (marked out of date; to be folded into `ROADMAP.md` and `gaps.md` in step R8.3) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-17 · **Change:** minor (local AUTO.1: unified Despres Connect account setup; domain-only SRV discovery) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
+
+Local Despres Connect build (AUTO.1, 2026-10-17): email-first setup carries the shared DAV URL
+with mail settings, checks all three services with one credential, and starts their downloads.
+See [automatic-setup.md](automatic-setup.md) for supported discovery and remaining provider limits.
+
 
 > **Out of date.** Written on 2026-10-11 and not kept up since: pictures in mail, invitations,
 > reminders that fire and much else have landed. For what is true now, see [`gaps.md`](gaps.md)
@@ -61,3 +66,5 @@ pictures and basic layout), #7 (at least rich replies), #9 and #11.
 |---|---|---|
 | 2026-10-11 | major | First assessment |
 | 2026-10-14 | minor | Marked out of date |
+
+| 2026-10-17 | minor | AUTO.1 local account setup; explicit DAV/provider limits |

@@ -311,6 +311,7 @@ pub struct Preset {
     username: String,
     incoming: ServerFields,
     outgoing: ServerFields,
+    dav_url: String,
     /// Something the owner should know before connecting; may be empty.
     note: String,
 }
@@ -329,6 +330,7 @@ impl Preset {
             incoming: ServerFields::read(v.get("incoming")),
             outgoing: ServerFields::read(v.get("outgoing")),
             note: text("note", 300),
+            dav_url: text("davUrl", 2000),
         }
     }
 }
@@ -379,6 +381,9 @@ pub struct AccountSetup {
     focus: bool,
     /// The domain's mail exchangers, once the host has them.
     lookup: Option<Receiver<Result<Vec<String>, String>>>,
+    discovery: Option<Receiver<Result<provider::Discovery, String>>>,
+    dav_started: bool,
+    dav_error: String,
     /// Whether the servers took the password, once the host knows.
     check: Option<Receiver<Result<(), String>>>,
     /// The owner is in the browser, signing in for this wizard.
@@ -467,6 +472,9 @@ impl AccountSetup {
             error: String::new(),
             focus: true,
             lookup: None,
+            discovery: None,
+            dav_started: false,
+            dav_error: String::new(),
             check: None,
             waiting: false,
             mail_only: false,
@@ -703,6 +711,7 @@ impl AccountSetup {
         self.username = preset.username;
         self.incoming = preset.incoming;
         self.outgoing = preset.outgoing;
+        self.dav_url = preset.dav_url;
         self.settings_open = false;
         self.guessed = false;
     }
@@ -718,6 +727,7 @@ impl AccountSetup {
             (Page::Address, Action::Go) => self.connect(app),
             (Page::Detecting, Action::Back) => {
                 self.lookup = None;
+                self.discovery = None;
                 self.go(Page::Address);
             }
             (Page::Choose, Action::Pick(kind)) => self.pick(app, kind),
@@ -792,6 +802,10 @@ impl AccountSetup {
             self.error = self.not_an_address();
             return;
         };
+        if app.session.mailbox.accounts.iter().any(|a| a.email.eq_ignore_ascii_case(self.email.trim())) {
+            self.error = tl!("This account is already connected. Open Account Settings to change it.").into();
+            return;
+        }
         if self.manual {
             self.go(Page::Choose);
             return;
@@ -813,6 +827,11 @@ impl AccountSetup {
         // unless the domain's mail exchangers say whose it is.
         (self.guessed, self.settings_open) = (true, true);
         let domain = address(&self.email).map(|(_, domain)| domain.to_ascii_lowercase());
+        if let (Some(discover), Some(domain)) = (&app.services.discover_account, domain.as_ref()) {
+            self.discovery = Some(discover(domain.clone()));
+            self.go(Page::Detecting);
+            return;
+        }
         match (&app.services.lookup_mx, domain) {
             (Some(lookup), Some(domain)) => {
                 self.lookup = Some(lookup(domain));
@@ -997,6 +1016,14 @@ impl AccountSetup {
             Err(_) if app.services.sync.is_none() => Outcome::Offline,
             Err(_) => Outcome::Later,
         };
+        self.dav_started = false;
+        self.dav_error.clear();
+        if !self.dav_url.is_empty() {
+            match app.execute("ui.davSync", json!({"account":id,"readOnly":true})) {
+                Ok(_) => self.dav_started = true,
+                Err(e) => self.dav_error = e,
+            }
+        }
         self.go(Page::Done);
     }
 
@@ -1044,6 +1071,41 @@ impl AccountSetup {
     }
 
     fn poll_lookup(&mut self, app: &mut MailApp) {
+        if let Some(rx) = &self.discovery {
+            let found = match rx.try_recv() {
+                Err(TryRecvError::Empty) => return,
+                Ok(answer) => answer.ok(),
+                Err(TryRecvError::Disconnected) => None,
+            };
+            self.discovery = None;
+            if let Some(found) = found {
+                let preset = self.preset_command(Some(&found.mx), None).and_then(|(cmd, p)| app.execute(cmd, p).ok()).map(|v| Preset::read(&v));
+                if let Some(mut preset) = preset {
+                    // OAuth providers retain their own sign-in and endpoints. DNS discovery
+                    // fills unknown password accounts only; it cannot replace a known preset.
+                    if !preset.known && preset.oauth.is_none() {
+                        let complete_mail = found.incoming.is_some() && found.outgoing.is_some();
+                        if let Some(server) = found.incoming {
+                            preset.incoming = ServerFields::of(Some(&server));
+                        }
+                        if let Some(server) = found.outgoing {
+                            preset.outgoing = ServerFields::of(Some(&server));
+                        }
+                        preset.dav_url = found.dav_url;
+                        preset.note = found.note;
+                        preset.known = complete_mail;
+                    }
+                    let known = preset.known;
+                    self.take(preset);
+                    self.guessed = !known;
+                    self.settings_open = !known;
+                    self.proceed(app);
+                    return;
+                }
+            }
+            self.go(Page::Password);
+            return;
+        }
         let answer = match self.lookup.as_ref().map(Receiver::try_recv) {
             Some(Err(TryRecvError::Empty)) => return,
             Some(Ok(answer)) => answer,
@@ -1111,7 +1173,7 @@ impl AccountSetup {
 
     /// Whether the host owes an answer: frames keep coming until it is in.
     fn busy(&self) -> bool {
-        self.lookup.is_some() || self.check.is_some() || self.waiting || self.approval.approving
+        self.discovery.is_some() || self.lookup.is_some() || self.check.is_some() || self.waiting || self.approval.approving
     }
 
     /// Whether the dialog is finished, by what one of its pages did outside a frame (a command
@@ -1133,6 +1195,7 @@ impl AccountSetup {
     /// The dialog is closing: stop what is under way and keep nothing that was typed in confidence.
     fn give_up(&mut self, app: &mut MailApp) {
         (self.lookup, self.check) = (None, None);
+        self.discovery = None;
         self.stop_sign_in(app);
         // An administrator's approval that Microsoft's page is open for is given up with it.
         if std::mem::take(&mut self.approval.approving) {
@@ -1185,7 +1248,7 @@ impl AccountSetup {
                 let server = shown(self.incoming.host.trim(), 120);
                 waiting_page(ui, &pass, self.page, tl!("Checking the account…"), &fmt(tl!("Signing in to {server}"), &[("server", &server)]))
             }
-            Page::Done => self.done_page(ui, &pass),
+            Page::Done => self.done_page(app, ui, &pass),
             Page::Settings => self.settings_page(app, ui, &mut pass),
         };
         action.is_some_and(|action| self.act(app, action))
@@ -1299,6 +1362,9 @@ impl AccountSetup {
             if !self.note.is_empty() {
                 note(ui, tl!(&self.note), t.text);
             }
+            if !self.dav_url.is_empty() {
+                note(ui, tl!("Connects mail, calendar and contacts together."), t.text);
+            }
             if asks {
                 self.password_field(ui, pass, "");
                 note(ui, kept_where(app), t.text_dim);
@@ -1326,7 +1392,7 @@ impl AccountSetup {
         if back { Some(Action::Back) } else { (ready && (go || entered(ui, pass))).then_some(Action::Go) }
     }
 
-    fn done_page(&mut self, ui: &mut Ui, pass: &Pass) -> Option<Action> {
+    fn done_page(&mut self, app: &MailApp, ui: &mut Ui, pass: &Pass) -> Option<Action> {
         let t = pass.t;
         let next = match self.outcome {
             Outcome::Downloading => tl!("Your mail is downloading now. The first time can take a few minutes."),
@@ -1348,6 +1414,13 @@ impl AccountSetup {
                 let done = fmt(tl!("{address} is set up"), &[("address", &shown(self.email.trim(), 120))]);
                 ui.label(RichText::new(done).font(semibold(16.0)).color(t.text));
                 ui.label(RichText::new(next).color(t.text_dim));
+                if self.dav_started {
+                    ui.label(RichText::new(&app.dav.status).color(t.text_dim));
+                } else if !self.dav_error.is_empty() {
+                    ui.label(RichText::new(&self.dav_error).color(t.orange));
+                } else if self.outcome != Outcome::Local && self.oauth.is_none() {
+                    ui.label(RichText::new(tl!("Calendar and contacts were not configured automatically for this provider.")).color(t.text_dim));
+                }
             });
             ui.add_space(6.0);
         });
@@ -1678,6 +1751,7 @@ mod tests {
     use crate::forms::Form;
     use crate::{Services, SignInRequest};
 
+    mod automatic;
     /// What the wizard says about a sign-in on Microsoft's page, and the approval help (M4.4).
     mod help;
 
@@ -2422,10 +2496,9 @@ mod tests {
         assert_eq!(wizard(&h).map(|w| (w.page, w.email.as_str(), w.name.as_str(), w.manual)), Some((Page::Address, "", "Noor Haddad", false)));
         // The same address again is refused where it is asked for.
         type_text(&mut h, "NOOR@example.org");
-        connect_manually(&mut h);
-        click(&mut h, Kind::Local.title());
-        assert_eq!(page(&h), Some(Page::Choose));
-        assert!(says(&h, "already set up") && addresses(&h) == ["noor@example.org"]);
+        click(&mut h, "Connect");
+        assert_eq!(page(&h), Some(Page::Address));
+        assert!(says(&h, "already connected") && addresses(&h) == ["noor@example.org"]);
     }
 
     /// (e) Microsoft shows no sign-in page without an application ID: the wizard asks for one.

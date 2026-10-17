@@ -215,6 +215,17 @@ fn adopt(m: &mut Mailbox, mut d: Download) {
     m.dav_collections = d.collections;
 }
 #[test]
+fn setup_checks_calendar_and_contacts_without_writing() {
+    let fake = Fake::new();
+    let mailbox = fake.mailbox();
+    check_account(&mailbox.accounts[0], "secret").unwrap();
+    assert!(fake.state.lock().unwrap().writes.is_empty());
+    let mut missing = mailbox.accounts[0].clone();
+    missing.dav_url = missing.dav_url.replace("/dav/", "/missing/");
+    assert!(check_account(&missing, "secret").is_err());
+    assert!(fake.state.lock().unwrap().writes.is_empty());
+}
+#[test]
 fn downloads_edits_creates_deletes_and_keeps_opaque_fields() {
     let fake = Fake::new();
     let mut m = fake.mailbox();

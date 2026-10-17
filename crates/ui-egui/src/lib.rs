@@ -97,6 +97,8 @@ pub struct Services {
     /// so account setup can tell whose servers an address at a company's own domain uses. Only
     /// the domain is given, never the mailbox name.
     pub lookup_mx: Option<Box<dyn Fn(String) -> Receiver<Result<Vec<String>, String>>>>,
+    /// Domain-only mail SRV and shared DAV discovery, with no credentials or user name.
+    pub discover_account: Option<Box<dyn Fn(String) -> Receiver<Result<mailcraft_model::provider::Discovery, String>>>>,
     /// Desktop: try signing in to an account's servers with a secret (a password, or an access
     /// token for an account that signs in on its provider's page) on a background thread, before
     /// the account is added.

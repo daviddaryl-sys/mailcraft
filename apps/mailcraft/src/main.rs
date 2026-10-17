@@ -756,6 +756,7 @@ fn services(file_dialog: file_dialogs::Hook, ctx: egui::Context, kept_pictures: 
     let pictures_kept = kept_pictures.clone();
     let busy_ctx = ctx.clone();
     let dav_ctx = ctx.clone();
+    let discovery_ctx = ctx.clone();
     let check_ctx = ctx.clone();
     let approval_ctx = ctx.clone();
     let (sync_ctx, sign_in_ctx, graph_ctx, mx_ctx, test_ctx) = (ctx.clone(), ctx.clone(), ctx.clone(), ctx.clone(), ctx);
@@ -795,8 +796,17 @@ fn services(file_dialog: file_dialogs::Hook, ctx: egui::Context, kept_pictures: 
         lookup_mx: Some(Box::new(move |domain| {
             background(&mx_ctx, "mail exchangers", move || mailcraft_net::lookup_mx(&domain).map_err(|e| e.to_string()))
         })),
+        discover_account: Some(Box::new(move |domain| {
+            background(&discovery_ctx, "account discovery", move || mailcraft_net::discovery::discover(&domain).map_err(|e| e.to_string()))
+        })),
         test_account: Some(Box::new(move |account, secret| {
-            background(&test_ctx, "account check", move || mailcraft_net::test_account(&account, &secret).map_err(|e| e.to_string()))
+            background(&test_ctx, "account check", move || {
+                mailcraft_net::test_account(&account, &secret).map_err(|e| e.to_string())?;
+                if !account.dav_url.is_empty() {
+                    mailcraft_net::dav::check_account(&account, &secret)?;
+                }
+                Ok(())
+            })
         })),
         // A picture a message keeps on the web, once the owner asked for that message's pictures.
         // The address is the message's choice, so `fetch` checks where it leads before it goes

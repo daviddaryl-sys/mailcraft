@@ -24,7 +24,7 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("account.list", "List Accounts", "File › Info", list).pure(),
         CommandSpec::new("account.preset", "Suggest Account Settings", "File › Info", preset)
             .pure()
-            .params(r#"{"email": string, "provider"?: "microsoft", "service"?: "microsoft365"|"outlook.com"|"google"|"yahoo"|"icloud"|"fastmail"|"aol"|"zoho", "mx"?: [string] (the domain's mail exchangers, when the host looked them up)} — answers the servers and sign-in an address usually takes; changes nothing"#),
+            .params(r#"{"email": string, "provider"?: "microsoft", "service"?: "microsoft365"|"outlook.com"|"google"|"yahoo"|"icloud"|"fastmail"|"aol"|"zoho"|"despresconnect", "mx"?: [string] (the domain's mail exchangers, when the host looked them up)} — answers the servers and sign-in an address usually takes; changes nothing"#),
         CommandSpec::new("sync.request", "Send/Receive All Folders", "Send / Receive", request)
             .pure()
             .key("F9")
@@ -140,9 +140,10 @@ fn preset(_: &mut Session, v: &Value) -> CmdResult {
     };
     // The owner says whose the account is: that settles it.
     let named = match p::str(v, "service") {
-        Some(name) => {
-            Some(provider::by_name(name).ok_or_else(|| bad("`service` is microsoft365, outlook.com, google, yahoo, icloud, fastmail, aol or zoho"))?)
-        }
+        Some(name) => Some(
+            provider::by_name(name)
+                .ok_or_else(|| bad("`service` is microsoft365, outlook.com, google, yahoo, icloud, fastmail, aol, zoho or despresconnect"))?,
+        ),
         None => None,
     };
     let own = provider::by_domain(&domain);
@@ -170,6 +171,7 @@ fn preset(_: &mut Session, v: &Value) -> CmdResult {
         "username": email,
         "incoming": server(&preset.incoming),
         "outgoing": server(&preset.outgoing),
+        "davUrl": preset.dav_url,
         "note": preset.note,
     }))
 }

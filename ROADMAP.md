@@ -2,7 +2,7 @@
 
 **Stage: early alpha** · next: beta, as [`CONTEXT.md`](CONTEXT.md) defines it, by the plan in [`docs/plans/roadmap-reset.md`](docs/plans/roadmap-reset.md)
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-15 · **Change:** minor (D1: Copy Diagnostics in the title bar; R4.5: rich signatures with a logo; R3.1: Graph folders behind the switch for testing; R5: sign-ins remembered on Linux; R2: Exchange Web Services removed; R4: rich-text compose; R4.2: the rich-text editor) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-17 · **Change:** minor (local AUTO.1: unified Despres Connect account setup; domain-only SRV discovery) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
 
 MailCraft aims for complete parity with Microsoft Outlook, then goes further on speed, openness,
 privacy and agent control. This page is the summary; the assessment is
@@ -48,9 +48,14 @@ Microsoft Graph for mail; rich-text replies; sign-ins remembered on Linux; messa
 when needed; system notifications and Copy diagnostics; then a beta run with testers.
 
 ## Progress log
+Local Despres Connect build (AUTO.1, 2026-10-17): email-first setup carries the shared DAV URL
+with mail settings, checks all three services with one credential, and starts their downloads.
+See [automatic-setup.md](docs/automatic-setup.md) for supported discovery and remaining provider limits.
+
 
 | Date | What landed |
 |---|---|
+| 2026-10-17 | AUTO.1 (local build): automatic Despres Connect mail/calendar/contact setup and encrypted SRV discovery; shared password in OS credential store; manual fallback for unsupported providers |
 | 2026-10-15 | D1 (Copy Diagnostics in the title bar; [spec](docs/specs/copy-diagnostics-button.md), [plan](docs/plans/copy-diagnostics-button.md)): a "Copy Diagnostics" pill at the right of the title bar, beside the account picture, runs the same command as Help › Copy Diagnostics, so testers find it; nothing new is collected and nothing is sent |
 | 2026-10-15 | R4.5 (rich signatures with a logo, #37; [spec](docs/specs/r4-5-signatures.md), [plan](docs/plans/r4-5-signatures.md)): a signature is rich text with up to 10 PNG, JPEG or GIF pictures (256 KB each, 512 KB together, checked by their own bytes), in line or picture beside text (the two-cell table) or above it; each account has one for new mail and one for replies and forwards, and a mailbox of 0.3.0 keeps its one for both. New mail gets it after a blank line, a reply above the original; changing From swaps it unless it was edited; Message › Signature replaces it or goes at the caret. Sent as HTML its pictures are inline parts (`multipart/related`), in plain text its words and each picture's description. File › Signatures edits it with the composer's own editor (font and colour, which the composer has too; Insert and Paste Picture, a dropped file, a picture's width by its corner, its description, the layout, the size total), makes one from details (name, title, organisation, phone, mobile, email, website, address, logo; working `tel:`, `mailto:` and `https:` links, laid out again until edited by hand) and previews it as recipients see it and in plain text. Paste keeps the first font family's name (added to the style whitelist for that alone). Also: typing in a message goes on after the window was left (#60) |
 | 2026-10-15 | R7.2 (Copy Diagnostics, #26): Help › Copy Diagnostics (`ui.copyDiagnostics`) puts the version, the platform (system, processor, desktop and display server) and the end of this run's log and the run before on the clipboard, for a problem report; every message in it has addresses, links, paths, IP addresses, host and file names, long ids and quoted text taken out, and nothing is sent. The problem form asks for it in place of the raw log |

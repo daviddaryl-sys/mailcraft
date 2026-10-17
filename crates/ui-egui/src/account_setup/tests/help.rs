@@ -547,14 +547,12 @@ fn a_closed_tab_a_timeout_a_no_and_a_missing_browser_each_say_so() {
     });
     assert!(page(&h) == Some(Page::SignIn) && says(&h, "Signing in didn't work") && says(&h, "AADSTS53003: Access has been blocked"));
     assert!(at(&h, "signInApprovalHelp", 0).is_some() && h.query_by_role_and_label(Role::Button, "Set up manually").is_some());
-    // What kept an account from being added after a sign-in is not a sign-in that ended: no such way.
-    let mut h = work_account(|a| {
+    // An existing address is caught before sign-in; it is not an approval problem.
+    let h = work_account(|a| {
         sign_ins(a, Some(Ok(signed_in_at_work())));
         a.execute("account.add", json!({"email": "noor@example.org"})).unwrap();
     });
-    assert!(page(&h) == Some(Page::SignIn) && says(&h, "already set up") && at(&h, "signInApprovalHelp", 0).is_none());
-    click(&mut h, "Set up manually");
-    assert_eq!(page(&h), Some(Page::Choose));
+    assert!(page(&h) == Some(Page::Address) && says(&h, "already connected") && at(&h, "signInApprovalHelp", 0).is_none());
 }
 
 /// (6) Everything is a command: the approval help, the message, the administrator's approval

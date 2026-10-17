@@ -24,7 +24,11 @@ pub const AVAILABLE: bool = false;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod dav;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod discovery;
+#[cfg(not(target_arch = "wasm32"))]
 mod dns;
+#[cfg(not(target_arch = "wasm32"))]
+mod dns_service;
 #[cfg(not(target_arch = "wasm32"))]
 mod favorite_paths;
 #[cfg(not(target_arch = "wasm32"))]

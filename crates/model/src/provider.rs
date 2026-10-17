@@ -18,6 +18,18 @@ pub struct Preset {
     pub outgoing: Server,
     /// Something the owner should know before connecting; may be empty.
     pub note: &'static str,
+    /// A combined CalDAV/CardDAV context, when the provider publishes one.
+    pub dav_url: &'static str,
+}
+
+/// Domain-only discovery results. No identity or credential belongs in this data.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Discovery {
+    pub mx: Vec<String>,
+    pub incoming: Option<Server>,
+    pub outgoing: Option<Server>,
+    pub dav_url: String,
+    pub note: String,
 }
 
 const APP_PASSWORD: &str = "This provider wants an app password (made in the account's security settings), not the everyday one.";
@@ -28,7 +40,7 @@ fn server(host: &str, port: u16, security: Security) -> Server {
 }
 
 fn with_password(service: &'static str, imap: &str, smtp: (&str, u16, Security), note: &'static str) -> Preset {
-    Preset { service, oauth: None, incoming: server(imap, 993, Security::Tls), outgoing: server(smtp.0, smtp.1, smtp.2), note }
+    Preset { service, oauth: None, incoming: server(imap, 993, Security::Tls), outgoing: server(smtp.0, smtp.1, smtp.2), note, dav_url: "" }
 }
 
 /// Outlook.com (`consumer`) or Microsoft 365 work and school mail.
@@ -41,6 +53,7 @@ pub fn microsoft(consumer: bool) -> Preset {
         incoming: server("outlook.office365.com", 993, Security::Tls),
         outgoing: server(smtp, 587, Security::StartTls),
         note: MICROSOFT,
+        dav_url: "",
     }
 }
 
@@ -72,6 +85,14 @@ pub fn by_domain(domain: &str) -> Option<Preset> {
     }
     let (tls, starttls) = (Security::Tls, Security::StartTls);
     Some(match domain.as_str() {
+        "despresai.com" => Preset {
+            service: "Despres Connect",
+            oauth: None,
+            incoming: server("outlook.despresai.com", 9933, tls),
+            outgoing: server("mail.despresai.com", 587, starttls),
+            dav_url: "https://outlook-test.computerhelpexpert.co.uk/dav/",
+            note: "Mail, calendar and contacts use your Despres Connect sign-in.",
+        },
         "gmail.com" | "googlemail.com" => with_password("Gmail", "imap.gmail.com", ("smtp.gmail.com", 465, tls), APP_PASSWORD),
         "icloud.com" | "me.com" | "mac.com" => with_password("iCloud", "imap.mail.me.com", ("smtp.mail.me.com", 587, starttls), APP_PASSWORD),
         "fastmail.com" | "fastmail.fm" => with_password("Fastmail", "imap.fastmail.com", ("smtp.fastmail.com", 465, tls), APP_PASSWORD),
@@ -134,6 +155,7 @@ pub fn by_name(name: &str) -> Option<Preset> {
         "fastmail" => by_domain("fastmail.com"),
         "aol" => by_domain("aol.com"),
         "zoho" => by_domain("zoho.com"),
+        "despres" | "despresconnect" => by_domain("despresai.com"),
         _ => None,
     }
 }
@@ -147,6 +169,7 @@ pub fn guess(domain: &str) -> Preset {
         incoming: server(&format!("imap.{domain}"), 993, Security::Tls),
         outgoing: server(&format!("smtp.{domain}"), 587, Security::StartTls),
         note: "",
+        dav_url: "",
     }
 }
 
