@@ -110,11 +110,11 @@ pub fn by_domain(domain: &str) -> Option<Preset> {
     }
     let (tls, starttls) = (Security::Tls, Security::StartTls);
     Some(match domain.as_str() {
-        "despresai.com" => Preset {
+        "despresai.com" | "badmintonsoldiers.club" => Preset {
             service: "Despres Connect",
             oauth: None,
             incoming: server("outlook.despresai.com", 9933, tls),
-            outgoing: server("mail.despresai.com", 587, starttls),
+            outgoing: server(&format!("mail.{domain}"), 587, starttls),
             dav_url: "https://outlook-test.computerhelpexpert.co.uk/dav/",
             carddav_url: "",
             note: "Mail, calendar and contacts use your Despres Connect sign-in.",

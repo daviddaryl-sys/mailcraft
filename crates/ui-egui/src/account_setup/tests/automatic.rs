@@ -103,6 +103,40 @@ fn email_and_one_password_start_mail_calendar_and_contacts_together() {
     assert!(!serde_json::to_string(&h.state().session.mailbox).unwrap().contains(TYPED));
 }
 #[test]
+fn badminton_migrated_profile_connects_all_services_without_dns_or_manual_settings() {
+    for dark in [false, true] {
+        let mut a = app(dark);
+        a.execute("ui.theme", json!({"value": if dark { "dark" } else { "light" }})).unwrap();
+        let asked = discoveries(&mut a, found());
+        let tried = checks(&mut a, Some(Ok(())));
+        let mail = syncs(&mut a);
+        let dav = dav_jobs(&mut a);
+        let mut h = open(a, json!({}));
+        connect(&mut h, "setup-check@BADMINTONSOLDIERS.CLUB");
+        assert_eq!(page(&h), Some(Page::Password));
+        assert!(wizard(&h).is_some_and(|w| !w.guessed && !w.settings_open));
+        assert!(says(&h, "Connects mail, calendar and contacts together"));
+        assert!(asked.lock().unwrap().is_empty());
+        type_password(&mut h);
+        press(&mut h, Key::Enter);
+        assert_eq!(page(&h), Some(Page::Done));
+        let account = h.state().session.mailbox.accounts.iter().find(|a| a.email.eq_ignore_ascii_case("setup-check@badmintonsoldiers.club")).unwrap();
+        assert_eq!(account.incoming, Some(Server { host: "outlook.despresai.com".into(), port: 9933, security: Security::Tls }));
+        assert_eq!(account.outgoing, Some(Server { host: "mail.badmintonsoldiers.club".into(), port: 587, security: Security::StartTls }));
+        assert_eq!(account.dav_url, "https://outlook-test.computerhelpexpert.co.uk/dav/");
+        assert_eq!(account.dav_login(), account.username);
+        let checked = &tried.lock().unwrap()[0].0;
+        assert_eq!(
+            (&checked.incoming, &checked.outgoing, &checked.dav_url, &checked.username),
+            (&account.incoming, &account.outgoing, &account.dav_url, &account.username)
+        );
+        assert_eq!(mail.lock().unwrap()[0].2, TYPED);
+        assert_eq!(*dav.lock().unwrap(), [(account.id, TYPED.into(), true)]);
+        assert!(!serde_json::to_string(&h.state().session.mailbox).unwrap().contains(TYPED));
+    }
+}
+
+#[test]
 fn despres_profile_bypasses_legacy_mx_and_never_selects_plesk_imap() {
     let mut a = app(false);
     let asked = discoveries(&mut a, found());

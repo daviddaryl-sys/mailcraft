@@ -2,8 +2,15 @@
 
 Add Account asks for an email address, then a password or the provider's own sign-in. A known
 provider's settings take priority over DNS guesses. Despres Connect has a local profile for
-`despresai.com`: encrypted IMAP on port 9933, the existing SMTP relay with mandatory STARTTLS,
-and the shared DAV endpoint. It never selects the legacy Plesk IMAP service on port 993.
+`despresai.com` and `badmintonsoldiers.club`: encrypted VM IMAP at
+`outlook.despresai.com:9933`, each domain's existing `mail.<domain>:587` SMTP relay with mandatory
+STARTTLS, and the shared `https://outlook-test.computerhelpexpert.co.uk/dav/` endpoint for both
+calendar and contacts. It never selects the retained Plesk IMAP service on port 993.
+For Badminton Soldiers, enter the full email address and current migrated-mailbox password;
+no server fields or separate DAV sign-in are required. The known profile takes priority over the
+domain's legacy MX records. Matching is case-insensitive and limited to these exact domains.
+The mailbox must have IMAP, SMTP and DAV access enabled on the VM. An already connected
+account is preserved; this update does not remove it, duplicate it or change its settings.
 
 One password is handed in memory to the mail authentication check and read-only DAV collection
 discovery. Both checks must succeed when DAV is configured. No message, test appointment or

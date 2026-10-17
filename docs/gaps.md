@@ -1,6 +1,11 @@
 # Where MailCraft falls short of Outlook
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-17 · **Change:** minor (local ICLOUD.3: keep setup fields above the modal overlay) · **Target:** Microsoft Outlook (Microsoft 365)
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-17 · **Change:** minor (local AUTO.2: migrated Badminton Soldiers setup) · **Target:** Microsoft Outlook (Microsoft 365)
+
+Local migrated-mailbox setup (AUTO.2, 2026-10-17): `badmintonsoldiers.club` uses the verified
+VM IMAP, existing SMTP relay and shared DAV profile before DNS lookup. Email and one password
+start mail, calendar and contacts together; existing accounts are preserved. See
+[automatic-setup.md](automatic-setup.md).
 
 Local setup input fix (ICLOUD.3, 2026-10-17): dialogs stay above their blocking overlay,
 including after an outside click. Pointer-driven password entry and Connect are covered in
@@ -70,6 +75,7 @@ done similar work in this code base.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-17 | minor | AUTO.2: automatic migrated Badminton Soldiers mail/calendar/contact profile |
 | 2026-10-11 | major | First version |
 | 2026-10-12 | minor | Rough edges: what is and isn't proven of calendar changes reaching the server |
 | 2026-10-12 | major | Gap 9 rewritten after the calendar's second and third waves (meetings, invitations in mail, the Scheduling Assistant); rough edges updated |
