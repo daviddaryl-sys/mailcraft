@@ -26,6 +26,8 @@ pub struct Preset {
 /// Domain-only discovery results. No identity or credential belongs in this data.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Discovery {
+    /// Confirmed by the fixed Despres Connect HTTPS discovery service, never by DNS alone.
+    pub despres_connect: bool,
     pub mx: Vec<String>,
     pub incoming: Option<Server>,
     pub outgoing: Option<Server>,

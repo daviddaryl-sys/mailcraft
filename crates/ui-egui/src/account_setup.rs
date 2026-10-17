@@ -1099,7 +1099,12 @@ impl AccountSetup {
             };
             self.discovery = None;
             if let Some(found) = found {
-                let preset = self.preset_command(Some(&found.mx), None).and_then(|(cmd, p)| app.execute(cmd, p).ok()).map(|v| Preset::read(&v));
+                let command = if found.despres_connect {
+                    self.preset_command(None, Some("despresconnect"))
+                } else {
+                    self.preset_command(Some(&found.mx), None)
+                };
+                let preset = command.and_then(|(cmd, p)| app.execute(cmd, p).ok()).map(|v| Preset::read(&v));
                 if let Some(mut preset) = preset {
                     // OAuth providers retain their own sign-in and endpoints. DNS discovery
                     // fills unknown password accounts only; it cannot replace a known preset.

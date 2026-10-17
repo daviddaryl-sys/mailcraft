@@ -1,6 +1,11 @@
 # MailCraft vs Outlook: the assessment
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-17 · **Change:** minor (local AUTO.2: migrated Badminton Soldiers setup) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-17 · **Change:** minor (local AUTO.3: verified Despres Connect tenant discovery) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
+
+Local tenant discovery (AUTO.3, 2026-10-17): unfamiliar domains can be confirmed by the
+fixed Despres Connect HTTPS service and use its mail/calendar/contact profile without an app
+update. Requests contain only the domain; unknown domains keep normal setup. See
+[automatic-setup.md](automatic-setup.md).
 
 Local migrated-mailbox setup (AUTO.2, 2026-10-17): `badmintonsoldiers.club` uses the verified
 VM IMAP, existing SMTP relay and shared DAV profile before DNS lookup. Email and one password
@@ -82,6 +87,7 @@ pictures and basic layout), #7 (at least rich replies), #9 and #11.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-17 | minor | AUTO.3: domain-only discovery of active Despres Connect tenants |
 | 2026-10-17 | minor | AUTO.2: automatic migrated Badminton Soldiers mail/calendar/contact profile |
 | 2026-10-11 | major | First assessment |
 | 2026-10-14 | minor | Marked out of date |

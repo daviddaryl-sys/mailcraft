@@ -19,7 +19,23 @@ preference, and mail plus an initial read-only calendar/contact download start a
 The completion screen shows DAV progress/errors separately from mail. An existing account is
 detected before sign-in, rather than duplicated. The current account needs no removal or re-add.
 
-Unknown domains use domain-only DNS-over-HTTPS lookups for MX and encrypted service records:
+For any other domain, MailCraft first asks the fixed HTTPS endpoint
+`https://outlook.despresai.com/.well-known/mailcraft?domain=<domain>`. It sends only the domain:
+no mailbox local part, password, cookie or authorization header. The API performs an exact,
+read-only check against active VM domains; it does not publish a domain list or any users.
+A positive response must name that exact domain, the expected provider and schema version.
+It enables the built-in Despres Connect profile (VM IMAP 9933, central
+`mail.despresai.com:587` STARTTLS relay and shared DAV). No endpoints are accepted from the
+response, and no redirects are followed. The lookup has a four-second timeout and 1 KiB body
+limit. Newly active VM domains need no app rebuild; inactive, unknown, invalid or unconfirmed
+domains do not receive this profile. Account protocol access and outbound relay provisioning
+remain part of normal server onboarding. A domain match is not a mailbox authentication check:
+mail and read-only DAV authentication must still succeed before adding an account.
+
+Existing exact profiles for the two already verified migrated domains are retained. Known public
+providers (including Microsoft and iCloud) keep their existing setup and are not queried here.
+If Despres Connect does not confirm an unfamiliar domain, its normal provider/DNS/manual flow
+continues. Generic DNS lookups use domain-only DNS-over-HTTPS for MX and encrypted service records:
 `_imaps._tcp`, `_submissions._tcp` (preferred over `_submission._tcp` with mandatory STARTTLS),
 `_caldavs._tcp` and `_carddavs._tcp`. DAV services can publish TXT `path` records naming shared or separate
 HTTPS contexts. Known iCloud profiles use Apple’s advertised service roots without requiring TXT paths. Lower SRV priority wins, with weighted choice at equal priority. Lookups are
@@ -37,7 +53,9 @@ path. Existing Microsoft OAuth is preserved. This feature does not add meetings,
 ActiveSync/MAPI. Existing DAV limits remain in [dav-sync.md](dav-sync.md).
 
 The Despres profile describes the deployment verified on 17 October 2026; update it deliberately
-when those endpoints change. This feature changes the local client, with no DNS/server changes.
+when those endpoints change. AUTO.3 adds the domain-only API route and a restricted HTTPS ingress location. It changes no
+mailbox privilege, password, SMTP route, DNS record, mail service or ActiveSync setting. The
+corresponding source download includes the API update and deployment instructions.
 
 Primary references: [RFC 6764](https://www.rfc-editor.org/rfc/rfc6764.html) (DAV discovery),
 [RFC 6186](https://www.rfc-editor.org/rfc/rfc6186.html) (mail service discovery),

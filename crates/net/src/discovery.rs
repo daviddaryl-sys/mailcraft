@@ -9,6 +9,8 @@ use mailcraft_model::{
     provider::{self, Discovery},
 };
 
+mod despres_connect;
+
 const LABELS: [&str; 5] = ["_imaps._tcp", "_submissions._tcp", "_submission._tcp", "_caldavs._tcp", "_carddavs._tcp"];
 
 /// Discover encrypted mail services and a shared DAV context. Provider presets take priority
@@ -19,6 +21,11 @@ pub fn discover(domain: &str) -> Result<Discovery, NetError> {
         return Err(NetError::Config("Account discovery needs a domain name".into()));
     }
     let domain = domain.to_ascii_lowercase();
+    if despres_connect::lookup(&domain).unwrap_or(false) {
+        // Membership comes from our fixed HTTPS service. Its reply supplies no endpoints.
+        // Keep credentials and the full address out of this request.
+        return Ok(Discovery { despres_connect: true, ..Default::default() });
+    }
     std::thread::scope(|scope| {
         let mx = std::thread::Builder::new().name("setup MX".into()).spawn_scoped(scope, || crate::lookup_mx(&domain));
         let jobs: Vec<_> = LABELS

@@ -137,6 +137,39 @@ fn badminton_migrated_profile_connects_all_services_without_dns_or_manual_settin
 }
 
 #[test]
+fn a_confirmed_despreconnect_tenant_uses_vm_settings_before_legacy_mx() {
+    for dark in [false, true] {
+        let mut a = app(dark);
+        a.execute("ui.theme", json!({"value": if dark { "dark" } else { "light" }})).unwrap();
+        let mut answer = found();
+        answer.despres_connect = true;
+        answer.mx = vec![MICROSOFT_MX.into()];
+        let asked = discoveries(&mut a, answer);
+        let tried = checks(&mut a, Some(Ok(())));
+        let mail = syncs(&mut a);
+        let dav = dav_jobs(&mut a);
+        let mut h = open(a, json!({}));
+        connect(&mut h, "setup-check@new-tenant.example.org");
+        assert_eq!(page(&h), Some(Page::Password));
+        assert_eq!(*asked.lock().unwrap(), ["new-tenant.example.org"]);
+        assert!(wizard(&h).is_some_and(|w| !w.guessed && !w.settings_open && w.oauth.is_none() && w.service == "Despres Connect"));
+        type_password(&mut h);
+        press(&mut h, Key::Enter);
+        assert_eq!(page(&h), Some(Page::Done));
+        let account = h.state().session.mailbox.accounts.iter().find(|a| a.email == "setup-check@new-tenant.example.org").unwrap();
+        assert_eq!(account.incoming.as_ref().unwrap().host, "outlook.despresai.com");
+        assert_eq!(account.incoming.as_ref().unwrap().port, 9933);
+        assert_eq!(account.outgoing.as_ref().unwrap().host, "mail.despresai.com");
+        assert_eq!(account.outgoing.as_ref().unwrap().security, Security::StartTls);
+        assert_eq!(account.dav_url, "https://outlook-test.computerhelpexpert.co.uk/dav/");
+        assert_eq!(tried.lock().unwrap()[0].1, TYPED);
+        assert_eq!(mail.lock().unwrap()[0].2, TYPED);
+        assert_eq!(*dav.lock().unwrap(), [(account.id, TYPED.into(), true)]);
+        assert!(!serde_json::to_string(&h.state().session.mailbox).unwrap().contains(TYPED));
+    }
+}
+
+#[test]
 fn despres_profile_bypasses_legacy_mx_and_never_selects_plesk_imap() {
     let mut a = app(false);
     let asked = discoveries(&mut a, found());
