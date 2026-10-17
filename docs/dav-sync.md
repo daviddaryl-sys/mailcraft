@@ -4,7 +4,7 @@ This original implementation adds shared or separate DAV connections to a passwo
 
 ## Connection
 
-Account Settings has an optional **Calendar and contacts (DAV URL)** field. For the configured Despres Connect service this is `https://outlook-test.computerhelpexpert.co.uk/dav/`. Discovery finds the authenticated principal, calendar/address-book homes, collections and their write privileges. No server paths are guessed from a collection's display name. The first sync downloads only.
+Account Settings has an optional **Calendar and contacts (DAV URL)** field. For the configured Despres Connect service this is `https://outlook.despresai.com/dav/`. Discovery finds the authenticated principal, calendar/address-book homes, collections and their write privileges. No server paths are guessed from a collection's display name. The first sync downloads only.
 
 `ui.davSync` accepts `{"account":10,"readOnly":true}` for read-only discovery and download. Without `readOnly`, subsequent runs send pending changes and receive server changes. The account's existing mail password is reused internally. No password belongs in a command, terminal history, report or source file.
 

@@ -117,7 +117,7 @@ pub fn by_domain(domain: &str) -> Option<Preset> {
             oauth: None,
             incoming: server("outlook.despresai.com", 9933, tls),
             outgoing: server(&format!("mail.{domain}"), 587, starttls),
-            dav_url: "https://outlook-test.computerhelpexpert.co.uk/dav/",
+            dav_url: "https://outlook.despresai.com/dav/",
             carddav_url: "",
             note: "Mail, calendar and contacts use your Despres Connect sign-in.",
         },

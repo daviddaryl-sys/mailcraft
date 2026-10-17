@@ -2,7 +2,7 @@
 
 **Stage: early alpha** · next: beta, as [`CONTEXT.md`](CONTEXT.md) defines it, by the plan in [`docs/plans/roadmap-reset.md`](docs/plans/roadmap-reset.md)
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-17 · **Change:** minor (local AUTO.3: verified Despres Connect tenant discovery) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-17 · **Change:** minor (DAV.4: branded default for new Despres Connect accounts) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
 
 MailCraft aims for complete parity with Microsoft Outlook, then goes further on speed, openness,
 privacy and agent control. This page is the summary; the assessment is
@@ -67,6 +67,7 @@ See [automatic-setup.md](docs/automatic-setup.md) for supported discovery and re
 
 | Date | What landed |
 |---|---|
+| 2026-10-17 | DAV.4: branded DAV default for new Despres Connect accounts; saved endpoints unchanged |
 | 2026-10-17 | AUTO.3 (local build): confirm any active Despres Connect tenant via bounded domain-only HTTPS discovery before DNS |
 | 2026-10-17 | AUTO.2 (local build): recognise badmintonsoldiers.club before DNS; VM mail, calendar and contacts with one password |
 | 2026-10-17 | ICLOUD.3 (local build): keep dialogs above their scrim; pointer-entry regression in both themes |

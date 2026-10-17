@@ -123,7 +123,7 @@ fn badminton_migrated_profile_connects_all_services_without_dns_or_manual_settin
         let account = h.state().session.mailbox.accounts.iter().find(|a| a.email.eq_ignore_ascii_case("setup-check@badmintonsoldiers.club")).unwrap();
         assert_eq!(account.incoming, Some(Server { host: "outlook.despresai.com".into(), port: 9933, security: Security::Tls }));
         assert_eq!(account.outgoing, Some(Server { host: "mail.badmintonsoldiers.club".into(), port: 587, security: Security::StartTls }));
-        assert_eq!(account.dav_url, "https://outlook-test.computerhelpexpert.co.uk/dav/");
+        assert_eq!(account.dav_url, "https://outlook.despresai.com/dav/");
         assert_eq!(account.dav_login(), account.username);
         let checked = &tried.lock().unwrap()[0].0;
         assert_eq!(
@@ -161,7 +161,7 @@ fn a_confirmed_despreconnect_tenant_uses_vm_settings_before_legacy_mx() {
         assert_eq!(account.incoming.as_ref().unwrap().port, 9933);
         assert_eq!(account.outgoing.as_ref().unwrap().host, "mail.despresai.com");
         assert_eq!(account.outgoing.as_ref().unwrap().security, Security::StartTls);
-        assert_eq!(account.dav_url, "https://outlook-test.computerhelpexpert.co.uk/dav/");
+        assert_eq!(account.dav_url, "https://outlook.despresai.com/dav/");
         assert_eq!(tried.lock().unwrap()[0].1, TYPED);
         assert_eq!(mail.lock().unwrap()[0].2, TYPED);
         assert_eq!(*dav.lock().unwrap(), [(account.id, TYPED.into(), true)]);
@@ -178,7 +178,7 @@ fn despres_profile_bypasses_legacy_mx_and_never_selects_plesk_imap() {
     assert_eq!(w.page, Page::Password);
     assert_eq!(w.service, "Despres Connect");
     assert_eq!(w.account().unwrap().incoming.unwrap().port, 9933);
-    assert_eq!(w.dav_url, "https://outlook-test.computerhelpexpert.co.uk/dav/");
+    assert_eq!(w.dav_url, "https://outlook.despresai.com/dav/");
     assert!(asked.lock().unwrap().is_empty());
     w.act(&mut a, Action::Back);
     w.email = "setup-check@gmail.com".into();
@@ -217,4 +217,20 @@ fn dns_does_not_replace_a_known_oauth_provider_or_silently_claim_missing_service
     let w = wizard(&h).unwrap();
     assert!(w.oauth.is_some() && w.dav_url.is_empty());
     assert_eq!(w.incoming.host, "outlook.office365.com");
+}
+
+#[test]
+fn new_despres_default_leaves_existing_account_endpoints_unchanged() {
+    let mut a = app(false);
+    a.execute("account.add", json!({"email":"existing@despresai.com", "davUrl":"https://outlook-test.computerhelpexpert.co.uk/dav/"})).unwrap();
+    let before = serde_json::to_value(&a.session.mailbox.accounts).unwrap();
+    let mut w = AccountSetup::new(&a, &json!({"email":"new@despresai.com"}));
+    w.act(&mut a, Action::Go);
+    assert_eq!(w.dav_url, "https://outlook.despresai.com/dav/");
+    assert!(w.carddav_url.is_empty());
+    assert_eq!(serde_json::to_value(&a.session.mailbox.accounts).unwrap(), before);
+    let mut existing = AccountSetup::new(&a, &json!({"email":"existing@despresai.com"}));
+    existing.act(&mut a, Action::Go);
+    assert!(existing.error.contains("already connected"));
+    assert_eq!(serde_json::to_value(&a.session.mailbox.accounts).unwrap(), before);
 }

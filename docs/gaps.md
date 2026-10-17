@@ -1,6 +1,8 @@
 # Where MailCraft falls short of Outlook
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-17 · **Change:** minor (local AUTO.3: verified Despres Connect tenant discovery) · **Target:** Microsoft Outlook (Microsoft 365)
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-17 · **Change:** minor (DAV.4: branded default for new Despres Connect accounts) · **Target:** Microsoft Outlook (Microsoft 365)
+
+New account default (DAV.4, 2026-10-17): Despres Connect uses `https://outlook.despresai.com/dav/` for calendar and contacts. Existing accounts retain their saved endpoints.
 
 Local tenant discovery (AUTO.3, 2026-10-17): unfamiliar domains can be confirmed by the
 fixed Despres Connect HTTPS service and use its mail/calendar/contact profile without an app
@@ -80,6 +82,7 @@ done similar work in this code base.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-17 | minor | DAV.4: branded DAV default for new accounts; existing endpoints preserved |
 | 2026-10-17 | minor | AUTO.3: domain-only discovery of active Despres Connect tenants |
 | 2026-10-17 | minor | AUTO.2: automatic migrated Badminton Soldiers mail/calendar/contact profile |
 | 2026-10-11 | major | First version |
