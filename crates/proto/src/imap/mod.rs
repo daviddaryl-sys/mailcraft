@@ -1,8 +1,8 @@
 //! An IMAP4rev1 client (RFC 3501) with the commands a two-way synchronisation needs: reading
 //! mailboxes, and changing flags, moving, copying, removing and filing messages (UID MOVE of
 //! RFC 6851; UID EXPUNGE and the `COPYUID` answer of RFC 4315). Special-use mailbox flags
-//! (RFC 6154) come through in [`Mailbox::flags`] as the server wrote them. Signing in is LOGIN
-//! with a password, or AUTHENTICATE XOAUTH2 with an OAuth access token.
+//! (RFC 6154) come through in [`Mailbox::flags`] as the server wrote them. Password sign-in
+//! uses advertised SASL PLAIN or LOGIN; OAuth uses AUTHENTICATE XOAUTH2.
 //!
 //! There is no plain EXPUNGE and no CLOSE here, on purpose: both remove every message marked
 //! `\Deleted` in the mailbox, also those another program marked.
@@ -12,6 +12,8 @@ mod utf7;
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Write};
+
+use base64::Engine as _;
 
 use parse::{Piece, Status, StatusLine, Value};
 pub use utf7::{decode_utf7, encode_utf7};
@@ -437,6 +439,64 @@ impl<S: Read + Write> Imap<S> {
             return Err(ProtoError::Protocol("the server sent data before the secure connection started".into()));
         }
         Ok(self.wire.into_inner())
+    }
+
+    /// Password sign-in: advertised SASL PLAIN (RFC 4616), otherwise LOGIN. The caller
+    /// must already have secured the transport. A refusal is final, never a retry with
+    /// another mechanism. `SASL-IR` (RFC 4959) permits the initial response inline.
+    pub fn authenticate_password(&mut self, user: &str, password: &str) -> Result<(), ProtoError> {
+        if !self.offers("AUTH=PLAIN") {
+            return self.login(user, password);
+        }
+        if user.is_empty() || password.is_empty() || user.chars().chain(password.chars()).any(char::is_control) {
+            return Err(ProtoError::Auth("the user name or password is empty or has a character that can't be sent".into()));
+        }
+        if user.len().saturating_add(password.len()) > 32 * 1024 {
+            return Err(ProtoError::Auth("the user name or password is too long to be sent".into()));
+        }
+        let payload = base64::engine::general_purpose::STANDARD.encode(format!("\0{user}\0{password}"));
+        self.secrets.add(password);
+        self.secrets.add(&payload);
+        let inline = self.offers("SASL-IR");
+        let tag = self.tag();
+        log::trace!("C: {tag} AUTHENTICATE PLAIN{}", if inline { " ***" } else { "" });
+        let mut out = format!("{tag} AUTHENTICATE PLAIN");
+        if inline {
+            out.push(' ');
+            out.push_str(&payload);
+        }
+        out.push_str("\r\n");
+        self.wire.write(out.as_bytes())?;
+        self.wire.flush()?;
+        let (mut sent, mut cancelled) = (inline, false);
+        let line = loop {
+            if let Some(line) = self.read_until(&tag, true, &mut ignore)? {
+                break line;
+            }
+            let answer = if !sent {
+                sent = true;
+                log::trace!("C: ***");
+                payload.as_str()
+            } else if !cancelled {
+                cancelled = true;
+                log::trace!("C: *");
+                "*"
+            } else {
+                return Err(ProtoError::Protocol("the server continued a cancelled sign-in".into()));
+            };
+            self.wire.write(format!("{answer}\r\n").as_bytes())?;
+            self.wire.flush()?;
+        };
+        match line.status {
+            _ if cancelled => Err(ProtoError::Auth("the server asked for more than a user name and password".into())),
+            Status::Ok if !sent => Err(ProtoError::Protocol("the server ended the command early".into())),
+            Status::Ok => {
+                self.authenticated = true;
+                Ok(())
+            }
+            Status::No => Err(ProtoError::Auth(self.refusal(&line))),
+            _ => Err(ProtoError::Rejected(self.refusal(&line))),
+        }
     }
 
     /// LOGIN with properly quoted (or literal) strings. NO → `ProtoError::Auth`.

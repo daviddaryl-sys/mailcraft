@@ -119,6 +119,68 @@ fn no_password_for_a_server_that_disabled_login() {
 
 const TOKEN: &str = "tok.en-123";
 
+#[test]
+fn password_plain_uses_inline_or_challenge_and_preserves_credentials() {
+    let user = "setup-check@example.org";
+    let password = "abcd-efgh-ijkl-mnop";
+    let payload = base64::engine::general_purpose::STANDARD.encode(format!("\0{user}\0{password}"));
+    for inline in [false, true] {
+        let caps = if inline { " SASL-IR" } else { "" };
+        let challenge = if inline { "" } else { "+ \r\n" };
+        let mut s = Script::new(format!("* OK [CAPABILITY IMAP4rev1 AUTH=PLAIN{caps}] ready\r\n{challenge}A0001 OK welcome\r\n"));
+        let mut imap = Imap::connect(&mut s).unwrap();
+        imap.authenticate_password(user, password).unwrap();
+        assert!(imap.is_authenticated());
+        assert!(!format!("{imap:?}").contains(password));
+        let separator = if inline { " " } else { "\r\n" };
+        assert_eq!(s.sent(), format!("A0001 AUTHENTICATE PLAIN{separator}{payload}\r\n"));
+        assert!(s.finished());
+    }
+    let mut s = Script::new("* OK [CAPABILITY IMAP4rev1] ready\r\nA0001 OK welcome\r\n");
+    Imap::connect(&mut s).unwrap().authenticate_password(user, password).unwrap();
+    assert_eq!(s.sent(), format!("A0001 LOGIN \"{user}\" \"{password}\"\r\n"));
+}
+
+#[test]
+fn password_plain_refusal_is_final_and_hides_raw_and_encoded_secret() {
+    let password = "synthetic-secret";
+    let payload = base64::engine::general_purpose::STANDARD.encode(format!("\0ada\0{password}"));
+    let mut s =
+        Script::new(format!("* OK [CAPABILITY IMAP4rev1 AUTH=PLAIN SASL-IR] ready\r\nA0001 NO [AUTHENTICATIONFAILED] {password} {payload}\r\n"));
+    let mut imap = Imap::connect(&mut s).unwrap();
+    let err = imap.authenticate_password("ada", password).unwrap_err();
+    assert!(matches!(err, ProtoError::Auth(_)));
+    let shown = format!("{err} {err:?} {imap:?}");
+    assert!(!shown.contains(password) && !shown.contains(&payload));
+    assert!(!imap.is_authenticated());
+    assert!(!s.sent().contains(" LOGIN "));
+    assert!(s.finished());
+}
+
+#[test]
+fn password_plain_rejects_early_success_and_bounds_challenges() {
+    let greeting = "* OK [CAPABILITY IMAP4rev1 AUTH=PLAIN] ready\r\n";
+    for (server, suffix) in [
+        ("A0001 OK early\r\n", ""),
+        ("+ \r\n+ extra\r\nA0001 OK ignored\r\n", "AGFkYQBwdw==\r\n*\r\n"),
+        ("+ \r\n+ extra\r\n+ more\r\n", "AGFkYQBwdw==\r\n*\r\n"),
+    ] {
+        let mut s = Script::new(format!("{greeting}{server}"));
+        let mut imap = Imap::connect(&mut s).unwrap();
+        assert!(imap.authenticate_password("ada", "pw").is_err());
+        assert!(!imap.is_authenticated());
+        assert_eq!(s.sent(), format!("A0001 AUTHENTICATE PLAIN\r\n{suffix}"));
+    }
+    for (user, password) in [("", "pw"), ("ada", ""), ("a\0da", "pw"), ("ada", "p\r\nw")] {
+        let mut s = Script::new(greeting);
+        assert!(Imap::connect(&mut s).unwrap().authenticate_password(user, password).is_err());
+        assert!(s.sent().is_empty());
+    }
+    let mut s = Script::new(greeting);
+    assert!(Imap::connect(&mut s).unwrap().authenticate_password("ada", &"x".repeat(32 * 1024)).is_err());
+    assert!(s.sent().is_empty());
+}
+
 /// What goes out for `ada@example.org` with [`TOKEN`].
 fn bearer() -> String {
     let payload = xoauth2("ada@example.org", TOKEN).unwrap();

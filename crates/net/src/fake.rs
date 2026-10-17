@@ -147,6 +147,8 @@ pub(crate) struct ImapWorld {
     pub(crate) token: String,
     /// Say the token may come with the command (SASL-IR).
     pub(crate) sasl_ir: bool,
+    /// Accept password sign-in through advertised SASL PLAIN, not LOGIN.
+    pub(crate) plain_only: bool,
     pub(crate) mailboxes: Vec<FakeMailbox>,
     /// Say STARTTLS is on offer (it isn't: what follows the go-ahead is no handshake).
     pub(crate) offer_starttls: bool,
@@ -187,10 +189,11 @@ impl ImapWorld {
     fn capabilities(&self) -> String {
         let xoauth2 = if self.token.is_empty() { "" } else { " AUTH=XOAUTH2" };
         let sasl_ir = if self.sasl_ir { " SASL-IR" } else { "" };
+        let plain = if self.plain_only { " AUTH=PLAIN" } else { "" };
         let starttls = if self.offer_starttls { " STARTTLS" } else { "" };
         let can_move = if self.can_move { " MOVE" } else { "" };
         let uidplus = if self.uidplus { " UIDPLUS" } else { "" };
-        format!("IMAP4rev1 SPECIAL-USE{xoauth2}{sasl_ir}{starttls}{can_move}{uidplus}")
+        format!("IMAP4rev1 SPECIAL-USE{xoauth2}{plain}{sasl_ir}{starttls}{can_move}{uidplus}")
     }
 
     pub(crate) fn mailbox(&mut self, raw: &str) -> &mut FakeMailbox {
@@ -401,7 +404,7 @@ fn serve_imap(stream: TcpStream, shared: Arc<Mutex<ImapWorld>>) {
             }
             "LOGIN" => {
                 let given = words(args);
-                if given == [world.user.clone(), world.password.clone()] {
+                if !world.plain_only && given == [world.user.clone(), world.password.clone()] {
                     signed_in = true;
                     reply.extend(format!("{tag} OK welcome\r\n").bytes());
                 } else {
@@ -412,6 +415,26 @@ fn serve_imap(stream: TcpStream, shared: Arc<Mutex<ImapWorld>>) {
             }
             "AUTHENTICATE" => {
                 let (mechanism, with_command) = args.split_once(' ').unwrap_or((args, ""));
+                if world.plain_only && mechanism.eq_ignore_ascii_case("PLAIN") {
+                    let (user, password) = (world.user.clone(), world.password.clone());
+                    drop(world);
+                    let payload = if with_command.is_empty() {
+                        let _ = out.write_all(b"+ \r\n");
+                        let Some(line) = read_line(&mut reader) else { return };
+                        shared.lock().unwrap().log.push(line.clone());
+                        line
+                    } else {
+                        with_command.to_string()
+                    };
+                    let decoded = base64::engine::general_purpose::STANDARD.decode(&payload).unwrap_or_default();
+                    if decoded == format!("\0{user}\0{password}").as_bytes() {
+                        signed_in = true;
+                        let _ = out.write_all(format!("{tag} OK welcome\r\n").as_bytes());
+                    } else {
+                        let _ = out.write_all(format!("{tag} NO [AUTHENTICATIONFAILED] refused\r\n").as_bytes());
+                    }
+                    continue;
+                }
                 if world.token.is_empty() || !mechanism.eq_ignore_ascii_case("XOAUTH2") {
                     reply.extend(format!("{tag} NO [CANNOT] no such way to sign in\r\n").bytes());
                 } else {

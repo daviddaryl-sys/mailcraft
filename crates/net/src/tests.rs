@@ -14,6 +14,24 @@ use crate::transport::Patience;
 use crate::{NetError, send, sync, sync_with, test_account};
 
 const PASSWORD: &str = "hunter2";
+
+#[test]
+fn account_check_uses_advertised_plain_without_retrying_login() {
+    for sasl_ir in [false, true] {
+        let imap = Fake::imap(ImapWorld { plain_only: true, sasl_ir, ..imap_world() });
+        let a = account(Some(&imap), None);
+        test_account(&a, PASSWORD).unwrap();
+        {
+            let w = imap.world();
+            assert_eq!(w.sent(" AUTHENTICATE PLAIN"), 1);
+            assert_eq!(w.sent(" LOGIN "), 0);
+        }
+        let error = test_account(&a, "synthetic-wrong-secret").unwrap_err().to_string();
+        assert!(error.contains("AUTHENTICATIONFAILED"));
+        assert!(!error.contains("synthetic-wrong-secret"));
+        assert_eq!(imap.world().sent(" LOGIN "), 0);
+    }
+}
 /// The access token of the accounts that sign in with OAuth.
 const TOKEN: &str = "eyJ0eXAi.tok-en_123.c2ln";
 /// `Date:` of every test message.

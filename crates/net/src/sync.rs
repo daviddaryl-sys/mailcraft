@@ -386,7 +386,7 @@ pub(crate) fn open_imap_with<'a>(
     if account.oauth.is_some() {
         imap.authenticate_xoauth2(user, secret)?;
     } else {
-        imap.login(user, secret)?;
+        imap.authenticate_password(user, secret)?;
     }
     Ok(imap)
 }

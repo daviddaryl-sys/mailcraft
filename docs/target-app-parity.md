@@ -1,6 +1,10 @@
 # MailCraft vs Outlook: the assessment
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-17 · **Change:** minor (local ICLOUD.1: iCloud mail, calendar and contacts setup; separate DAV origins) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-17 · **Change:** minor (local ICLOUD.2: advertised IMAP SASL PLAIN password sign-in) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
+
+Local iCloud sign-in update (ICLOUD.2, 2026-10-17): password accounts use advertised
+IMAP SASL PLAIN, including SASL-IR, with LOGIN retained for servers that do not advertise it.
+Refused credentials are not retried with another method. Live iCloud verification is pending.
 
 Local iCloud build (ICLOUD.1, 2026-10-17): separate CalDAV/CardDAV endpoints, Apple app-specific
 password guidance and constrained Apple partition discovery. Verification status and limits are
@@ -75,3 +79,5 @@ pictures and basic layout), #7 (at least rich replies), #9 and #11.
 | 2026-10-17 | minor | AUTO.1 local account setup; explicit DAV/provider limits |
 
 | 2026-10-17 | minor | ICLOUD.1: separate Apple DAV setup and limits |
+
+| 2026-10-17 | minor | ICLOUD.2: advertised IMAP SASL PLAIN; live iCloud sign-in pending |
