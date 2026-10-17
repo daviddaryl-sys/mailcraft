@@ -987,7 +987,21 @@ impl MailApp {
         } else {
             None
         };
+        // An account sent to other servers (mail or DAV) takes no password or sign-in along: what
+        // was given was for the old ones, and a script or an agent must not be able to redirect it.
+        let servers =
+            |app: &Self, account: Id| app.session.mailbox.account(account).map(|a| (a.incoming.clone(), a.outgoing.clone(), a.dav_url.clone()));
+        let moving =
+            if id == "account.edit" { params.get("id").and_then(Value::as_u64).map(|account| (account, servers(self, account))) } else { None };
         let r = self.session.run(id, &params).map_err(|e| e.to_string());
+        if let (Ok(_), Some((account, was))) = (&r, moving)
+            && servers(self, account) != was
+            && let Some(address) = self.session.mailbox.account(account).map(|a| a.email.clone())
+        {
+            self.passwords.remove(&account);
+            self.tokens.remove(&account);
+            self.forget_secrets(&address);
+        }
         // Asked for the reminders: their window comes up, due or not.
         if r.is_ok() && id == "view.reminders" {
             self.reminders.asked_for = true;
