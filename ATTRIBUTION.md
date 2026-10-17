@@ -36,3 +36,12 @@ Generated-in-code art is original and has no file to list: the UI icon set (`cra
 | `assets/fonts/OFL-Inter.txt` | (licence text) | upstream project | — |  |
 | `assets/fonts/OFL-SourceSans3.txt` | (licence text) | upstream project | — |  |
 | `assets/fonts/OFL-JetBrainsMono.txt` | (licence text) | upstream project | — |  |
+
+## Despres Connect edition branding (2026-10-17)
+
+| Asset | Author | Source | Licence | Notes |
+|---|---|---|---|---|
+| `assets/branding/despres-connect/mailcraft-original.png` | MailCraft Despres Connect edition | Original AI-generated artwork commissioned by the repository owner using OpenAI image generation, 2026-10-17; no third-party reference assets | MIT OR Apache-2.0 | Original generated master, transparent outer corners |
+| `assets/branding/despres-connect/mailcraft-github.png` | MailCraft Despres Connect edition | Original AI-generated artwork commissioned by the repository owner using OpenAI image generation, 2026-10-17; no third-party reference assets | MIT OR Apache-2.0 | 1024px GitHub and README logo |
+| `assets/branding/despres-connect/MailCraft.icns` | MailCraft Despres Connect edition | Original AI-generated artwork commissioned by the repository owner using OpenAI image generation, 2026-10-17; no third-party reference assets | MIT OR Apache-2.0 | macOS icon exported from original master |
+| `assets/branding/despres-connect/README.md` | MailCraft Despres Connect edition | Written for this project | MIT OR Apache-2.0 | New icon design and export documentation |

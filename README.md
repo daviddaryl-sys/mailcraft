@@ -1,29 +1,60 @@
-# MailCraft
+# MailCraft — Despres Connect edition
 
-<img src="assets/app-icon/hicolor/128x128/apps/io.github.billsecond.mailcraft.png" width="96" alt="The MailCraft icon: a carrier pigeon with a sealed letter in its beak">
+<img src="assets/branding/despres-connect/mailcraft-github.png" width="96" alt="MailCraft Despres Connect icon: an ivory folded envelope and coral seal on a deep teal tile">
 
-**An open-source mail, calendar, contacts and tasks program, written from scratch in Rust.**
+**Mail, calendars, contacts and tasks in one open-source, native Rust app.**
 
-MailCraft is a clean-room reimplementation of the mail client people already know how to use: the ribbon, the folder pane, the message list with its reading pane, conversations, flags, categories, rules, a calendar with recurring meetings, people and to-dos. It is a native, GPU-rendered app (no Electron, no web view), it also runs in a browser tab through WebAssembly, and every action in it is a command that scripts and AI agents can run too.
+MailCraft brings your email and daily planning together in a familiar desktop workspace. Organise messages, search your mail, manage calendars and keep contacts close, with a native egui interface and downloadable builds for both Apple Silicon and Intel Macs.
 
-> **Status: early alpha (0.3).** The foundations are in place and tested; a lot of what a daily driver needs is not there yet. See [ROADMAP.md](ROADMAP.md) and [docs/gaps.md](docs/gaps.md) for an honest list.
+This independently maintained edition adds Despres Connect account setup, CalDAV/CardDAV synchronization, iCloud setup improvements and fixes that protect saved credentials when server settings change. It builds on the original MailCraft project, credited below.
 
-MailCraft follows the architecture and conventions of [WordCraft](https://github.com/storytold/wordcraft) and the other Craft apps: the same layered crates, the same "everything is a command" engine, the same egui front end and design tokens, the same control channel, MCP server, tooling and packaging.
+Privacy is part of the design: mail stays in your local mailbox, message content runs no scripts, remote pictures load only when permitted, and remembered passwords use the operating system's credential store. Mail sync connects to your configured provider. Developers can also build the Rust code for other desktop platforms or WebAssembly, and automate actions through the CLI, local control channel or MCP server. The browser build imports files; it does not connect directly to mail servers.
 
-## What works today
+> **Early alpha (0.3):** useful features are available, but provider compatibility and daily-use reliability are still being tested. Back up important mail and review the [known gaps](docs/gaps.md) and [roadmap](ROADMAP.md) before relying on it.
 
-- **Mail:** accounts, nested folders and favourites, a virtualised message list grouped by date (or sender, importance), sort, filters, conversations, pinning, a reading pane (right, bottom or off) whose text you can select and copy, flags with due dates, colour categories, importance, junk and archive, move and copy (or drag onto a folder), two-step delete with a question before anything is gone for good, flag and delete on the row under the pointer, a click on a row's left edge to switch read and unread, a double-click to open a message in a window of its own, undo and redo for all of it.
-- **Search:** a query language in the search box: `budget from:ada has:attachment -draft after:2026-10-01 is:unread`, in one folder or every mailbox.
-- **Writing:** new mail (also from a `mailto:` link clicked anywhere, once MailCraft is your mail program), Reply, Reply All and Forward with the original quoted, attachments, drafts, signatures, recipients suggested as you type (contacts, then the people you have exchanged mail with), Check Names, importance. Plain text for now.
-- **Rules:** conditions (from, to, subject, body, attachment, importance) and actions (move, categorise, flag, mark read, importance, delete), run on new mail or on demand.
-- **Calendar:** day, work-week, week and month views; appointments and meetings with attendees; recurrence (daily, weekly on chosen days, monthly by date or by "second Tuesday", yearly; counts, end dates, skipped days); reminders that come up in a window of their own (dismiss, snooze), show-as, private; several calendars. Click or drag over empty time and type to make an appointment on the spot; drag one to move it, its edge to resize it, with Ctrl to copy it; the keyboard works the grid as it does in Outlook; double-click opens an item in a window of its own. A repeating item asks "just this one" or "the entire series". With a Microsoft 365 account, what you make, move, change or delete is on the server at once, series and every calendar of the account included, and the calendar keeps itself current; meetings send their invitations, updates and cancellations through the server, and you answer invitations from the calendar or straight from the message in the Inbox (Accept, Tentative, Decline, with what else is on at that time). Appointments and meetings open in windows of their own, with their own command bar, a recurrence dialog and a Scheduling Assistant that shows when the people you invite are free. Several calendars stand side by side or overlaid, each in its colour. How far this is from Outlook, row by row: [docs/calendar-parity.md](docs/calendar-parity.md).
-- **People and Tasks:** contacts with several addresses and phones, favourites and categories; to-dos with due dates, importance, and links to the flagged message they came from.
-- **Servers:** IMAP and SMTP over TLS or STARTTLS, on the desktop and in the CLI. Mail comes down, and what you do here goes back up: read marks, flags, moves, deletions and a copy of what you send. Account setup recognises the provider from the address (for a company's own domain, from who takes its mail); Outlook.com and Microsoft 365 sign in on Microsoft's page (OAuth 2.0), and sign-ins are remembered by the system's credential store (Windows Credential Manager, the macOS keychain, or the Secret Service of GNOME Keyring or KWallet on Linux and FreeBSD). Where an organisation lets only an administrator approve a new program, Microsoft's page says "Need admin approval" instead of signing you in: MailCraft says what to do next while that page is still open (an administrator approves it once on Microsoft's page, opened from MailCraft; anybody else copies a short message for one; then you sign in again), and nothing of you is in the address that is passed on. Send/Receive runs by itself, and mail shows as it arrives, the Inbox first. For Microsoft accounts, mail is sent through Microsoft Graph, the calendar goes both ways, contacts come down, and the folder pane's Favorites are the ones you keep in Outlook (read from the server through Microsoft Graph once you say so, never changed there; a work or school account may need its administrator's approval once). This has been used against one real Microsoft 365 mailbox, and no other provider yet: see [docs/gaps.md](docs/gaps.md).
-- **Files:** `.eml` and `.mbox` messages, `.ics` calendars, `.vcf` contacts, in and out; the mailbox as a `.mailcraft` file with its message content in a folder beside it, saved in the background, or as one self-contained file.
-- **Reading mail safely:** HTML mail is laid out with its tables, colours, lists and the pictures attached to it, readable in light and dark, without running anything in it; pictures on the web are downloaded only when you ask (for one message, always for a sender, or for all mail if you switch that on), and the request tells the sender's server nothing but the picture's address; links show where they go.
-- **Look:** Outlook's layout: the rail, the folder pane, a one-row ribbon (or the classic three-row one, your choice), light and dark following the system's setting unless you choose; the system's own interface font on Windows.
-- **Installing:** every release is on the [Releases page](https://github.com/UCS-Care-Group/mailcraft/releases) with its checksums: a Windows installer (`.msi`) and portable zip for x64, x86 and ARM64; `.AppImage`, `.deb`, `.rpm`, `.flatpak` and `.tar.gz` for Linux on x86_64 and aarch64; a macOS disk image for Apple silicon and Intel; a FreeBSD tarball; a static site for the browser. The builds are not signed yet, so Windows and macOS ask before running them. One window per mailbox: starting MailCraft again, or opening a message file or a `mailto:` link, goes to the window that is already open. See [docs/releasing.md](docs/releasing.md) for what has been built and tested so far.
-- **Agents:** a CLI, a JSON control channel and an MCP server expose every command; the same registry drives the ribbon and the keyboard.
+## Download for Mac
+
+**[Latest packaged build: MailCraft 0.3.0 DAV.4](https://github.com/daviddaryl-sys/mailcraft/releases/tag/v0.3.0-dav4-macos-arm64)**
+
+| Your Mac | Download |
+|---|---|
+| Apple Silicon — M1, M2, M3, M4 or newer | [Download for Apple Silicon (arm64 ZIP)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.3.0-dav4-macos-arm64/MailCraft-0.3.0-dav4-macos-arm64.zip) |
+| Intel | [Download for Intel (x86_64 ZIP)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.3.0-dav4-macos-arm64/MailCraft-0.3.0-dav4-macos-x86_64.zip) |
+
+Check **Apple menu → About This Mac** if you are unsure: “Chip” identifies Apple Silicon; “Processor” naming Intel means the Intel download. Both bundles require macOS 11 or later. Unzip the download, quit and back up any existing MailCraft app, then drag `MailCraft.app` into Applications. No Rust or Homebrew installation is required.
+
+These are early-alpha builds with local ad-hoc signatures, **not Apple-notarized**. macOS may require approval in **System Settings → Privacy & Security**; managed Macs may block them. Downloads contain the app and its licences, with no saved accounts, passwords or private mailbox data. Configure your own accounts after installation. [Checksums](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.3.0-dav4-macos-arm64/SHA256SUMS.txt) and verification details are on the release page. Intel's version check passed under Rosetta; physical Intel hardware and older macOS versions have not been tested.
+
+## What this version improves
+
+This edition builds on the original MailCraft foundation with work focused on account setup, calendar/contact sync and credential handling:
+
+- **Despres Connect setup:** email-first setup configures mail, calendar and contacts together. Known migrated domains use their verified profile; other domains are checked against the Despres Connect domain-discovery service before ordinary provider discovery. New accounts use `https://outlook.despresai.com/dav/`; existing accounts retain their saved settings. [Setup details](docs/automatic-setup.md).
+- **CalDAV and CardDAV:** shared or separate calendar/contact endpoints, discovery of collections and write permissions, and conditional synchronization with conflict checks. An unreadable new server item is left on the server and skipped so it cannot stall the whole download. Personal Contacts is preferred over recipient-cache collections. [Scope and limits](docs/dav-sync.md).
+- **iCloud setup:** separate Apple calendar/contact service roots, constrained Apple server discovery, app-specific-password guidance, advertised IMAP SASL PLAIN support, and a fix for blocked account-dialog input. [iCloud details and verification limits](docs/icloud-setup.md).
+- **Credential protection:** changing an account's mail, calendar or separate contacts server clears its saved password/sign-in, including the OS credential-store entry, so a server change cannot silently carry remembered credentials to another endpoint.
+
+The DAV.4 source passed all six repository CI steps, including **1,746 tests** and the WASM build check. The Apple Silicon build has been used with three configured accounts; this is not a claim of compatibility with every provider or Mac. This remains an early-alpha project: review [known gaps](docs/gaps.md) before relying on it for important mail.
+
+## Original project and credit
+
+This is an independently maintained version of MailCraft, based on [billsecond/mailcraft](https://github.com/billsecond/mailcraft). The [original MailCraft project at UCS-Care-Group/mailcraft](https://github.com/UCS-Care-Group/mailcraft) and its contributors created the Rust engine, egui interface, WASM support and most of the features described below. Those foundations are their work; the additions above describe this edition's changes.
+
+Original copyright, [MIT](LICENSE-MIT)/[Apache-2.0](LICENSE-APACHE) licences, [NOTICE](NOTICE) and [asset attribution](ATTRIBUTION.md) are retained. This edition's source and Mac downloads are maintained in [daviddaryl-sys/mailcraft](https://github.com/daviddaryl-sys/mailcraft); upstream releases may have different features and fixes.
+
+## What you can do
+
+- **Keep mail organised.** Use folders, favourites, conversations, flags, categories, rules and undo. Read messages in a preview pane or open them in their own windows.
+- **Find messages quickly.** Search with filters such as `from:`, `has:attachment`, `is:unread` and date ranges, in one folder or across mailboxes.
+- **Write and reply.** Compose mail, reply or forward, add attachments and signatures, and save drafts. Supported rich-text formatting includes emphasis, links and lists; see the [current editing limits](docs/gaps.md).
+- **Plan your day.** Browse day, week and month calendars, create appointments and recurring events, and manage reminders. Meeting and server-sync features depend on the account provider; see [calendar support](docs/calendar-parity.md) and [DAV limits](docs/dav-sync.md).
+- **Keep contacts and tasks nearby.** Store contact details, use recipient suggestions and manage to-dos with dates, priorities and links to flagged mail.
+- **Connect your accounts.** Use encrypted IMAP/SMTP, Microsoft sign-in where supported, or the Despres Connect and iCloud setup flows. CalDAV/CardDAV adds calendar and contacts synchronization to compatible password-based accounts. [Account setup](docs/automatic-setup.md).
+- **Read with privacy controls.** HTML mail is rendered without scripts. Remote images are controlled by your picture-download preferences; links show their destinations.
+- **Bring your files with you.** Import and export `.eml`, `.mbox`, `.ics` and `.vcf` files, with mailbox data saved locally.
+- **Automate your workflow.** Use the CLI, authenticated local JSON control channel or MCP server to run the same commands as the interface. [Automation documentation](docs/mcp.md).
+
+This edition has packaged Mac downloads above. Other platforms can be built from source; upstream binaries do not necessarily include this edition's changes. See [packaging documentation](docs/releasing.md) for the shared build tooling.
 
 ## What it looks like
 
@@ -38,7 +69,7 @@ The pictures are of the sample mailbox (`--sample`): invented people and invente
 
 | | |
 |---|---|
-| **Desktop** | macOS (universal), Windows (x64, arm64), Linux (x86_64, aarch64, riscv64), FreeBSD (x86_64) |
+| **Desktop** | macOS (separate Apple Silicon and Intel downloads), Windows (x64, arm64), Linux (x86_64, aarch64, riscv64), FreeBSD (x86_64) |
 | **Web** | any modern browser, through WebAssembly (WebGPU, or WebGL2 where that is missing) |
 
 The browser build is the same app with three differences that a browser imposes: it can't open connections to mail servers (bring mail in with File › Import, or use the desktop app), the mailbox lives in the browser's storage, and saving means downloading.
@@ -46,7 +77,7 @@ The browser build is the same app with three differences that a browser imposes:
 ## Build and run
 
 ```
-git clone https://github.com/UCS-Care-Group/mailcraft
+git clone https://github.com/daviddaryl-sys/mailcraft.git
 cd mailcraft
 cargo run --release -p mailcraft -- --sample
 ```
@@ -109,7 +140,7 @@ A crate may only depend on lower layers, and nothing below L6 knows about the UI
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) first (it is for people as much as for agents): the never-crash rules, the asset policy and the quality gates are short and not negotiable. Work to beta is a list of issues, one per task in [the plan](docs/plans/roadmap-reset.md): claim one before you build it.
 
-**Want to test it on your own mail?** [Sign up as a tester](https://github.com/UCS-Care-Group/mailcraft/issues/new?template=tester-signup.yml), for the alpha now or the beta later.
+**Testing this edition?** Report bugs in [this repository’s issues](https://github.com/daviddaryl-sys/mailcraft/issues). Remove passwords, tokens and private message contents from any report. To participate in upstream testing, use the [original project’s tester signup](https://github.com/UCS-Care-Group/mailcraft/issues/new?template=tester-signup.yml).
 
 ## License
 
