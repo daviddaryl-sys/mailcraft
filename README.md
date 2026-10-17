@@ -14,16 +14,16 @@ Privacy is part of the design: mail stays in your local mailbox, message content
 
 ## Download for Mac
 
-**[Latest packaged build: MailCraft 0.3.0 DAV.4](https://github.com/daviddaryl-sys/mailcraft/releases/tag/v0.3.0-dav4-macos-arm64)**
+**[Latest packaged build: MailCraft 0.3.0 with the new icon](https://github.com/daviddaryl-sys/mailcraft/releases/tag/v0.3.0-brand2-macos)**
 
 | Your Mac | Download |
 |---|---|
-| Apple Silicon — M1, M2, M3, M4 or newer | [Download for Apple Silicon (arm64 ZIP)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.3.0-dav4-macos-arm64/MailCraft-0.3.0-dav4-macos-arm64.zip) |
-| Intel | [Download for Intel (x86_64 ZIP)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.3.0-dav4-macos-arm64/MailCraft-0.3.0-dav4-macos-x86_64.zip) |
+| Apple Silicon — M1, M2, M3, M4 or newer | [Download for Apple Silicon (arm64 ZIP)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.3.0-brand2-macos/MailCraft-0.3.0-brand2-macos-arm64.zip) |
+| Intel | [Download for Intel (x86_64 ZIP)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.3.0-brand2-macos/MailCraft-0.3.0-brand2-macos-x86_64.zip) |
 
 Check **Apple menu → About This Mac** if you are unsure: “Chip” identifies Apple Silicon; “Processor” naming Intel means the Intel download. Both bundles require macOS 11 or later. Unzip the download, quit and back up any existing MailCraft app, then drag `MailCraft.app` into Applications. No Rust or Homebrew installation is required.
 
-These are early-alpha builds with local ad-hoc signatures, **not Apple-notarized**. macOS may require approval in **System Settings → Privacy & Security**; managed Macs may block them. Downloads contain the app and its licences, with no saved accounts, passwords or private mailbox data. Configure your own accounts after installation. [Checksums](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.3.0-dav4-macos-arm64/SHA256SUMS.txt) and verification details are on the release page. Intel's version check passed under Rosetta; physical Intel hardware and older macOS versions have not been tested.
+These are early-alpha builds with local ad-hoc signatures, **not Apple-notarized**. macOS may require approval in **System Settings → Privacy & Security**; managed Macs may block them. Downloads contain the app and its licences, with no saved accounts, passwords or private mailbox data. Configure your own accounts after installation. [Checksums](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.3.0-brand2-macos/SHA256SUMS.txt) and verification details are on the release page. Intel's version check passed under Rosetta; physical Intel hardware and older macOS versions have not been tested.
 
 ## What this version improves
 
