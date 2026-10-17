@@ -1,5 +1,29 @@
 use super::*;
 
+#[test]
+fn password_remains_clickable_after_clicking_the_dialog_scrim() {
+    for dark in [false, true] {
+        let mut a = app(dark);
+        let tried = checks(&mut a, Some(Ok(())));
+        let mut h = open(a, json!({}));
+        connect(&mut h, "setup-check@icloud.com");
+        let pos = egui::pos2(20.0, 20.0);
+        h.event(egui::Event::PointerMoved(pos));
+        h.run_steps(2);
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+            h.run_steps(3);
+        }
+        h.get_by_role(Role::PasswordInput).click();
+        h.run_steps(3);
+        type_text(&mut h, TYPED);
+        assert_eq!(wizard(&h).unwrap().password.0, TYPED);
+        click(&mut h, "Connect");
+        assert_eq!(page(&h), Some(Page::Done));
+        assert_eq!(tried.lock().unwrap()[0].1, TYPED);
+    }
+}
+
 fn discoveries(app: &mut MailApp, answer: provider::Discovery) -> Log<String> {
     let asked: Log<String> = Default::default();
     let log = asked.clone();

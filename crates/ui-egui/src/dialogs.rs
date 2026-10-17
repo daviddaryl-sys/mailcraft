@@ -675,6 +675,9 @@ pub(crate) fn window(ctx: &egui::Context, title: &str, width: f32, add: impl FnO
     let mut open = true;
     egui::Window::new(egui::RichText::new(title).font(semibold(14.0)))
         .id(egui::Id::new("dialog"))
+        // The full-window scrim may be raised by a click outside this dialog.
+        // Keep the fields above it so they remain reachable afterwards.
+        .order(egui::Order::Foreground)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)

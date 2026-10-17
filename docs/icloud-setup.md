@@ -1,6 +1,6 @@
 # iCloud setup in the local MailCraft build
 
-> **Status:** local ICLOUD.2 · **Updated:** 2026-10-17 · **Change:** advertised IMAP SASL PLAIN password authentication
+> **Status:** local ICLOUD.3 · **Updated:** 2026-10-17 · **Change:** password entry stays above the modal overlay
 
 Add Account recognizes `icloud.com`, `me.com` and `mac.com`, and supports iCloud selected
 manually or recognized by its MX records. Mail uses `imap.mail.me.com:993` with TLS and
@@ -23,6 +23,14 @@ account is added. Initial DAV download is read-only. Failure does not add a half
 account. Revoking an app-specific password or changing the Apple Account password requires
 a new app-specific password. A user without iCloud Mail enabled cannot connect all three
 services through this all-three setup flow.
+
+## Password entry
+
+The local ICLOUD.3 update keeps dialogs on a layer above the full-window blocking overlay.
+Previously clicking outside the dialog could raise that overlay over its inputs, leaving
+the password empty even when the owner clicked and typed. A pointer-driven regression
+reproduces the empty field before the change and verifies password entry and Connect in
+both themes. Synthetic keyboard-focus tests alone did not catch the layer-order problem.
 
 ## IMAP password authentication
 
@@ -82,3 +90,5 @@ Primary sources: [Apple mail settings](https://support.apple.com/en-us/102525),
 |---|---|---|
 | 2026-10-17 | ICLOUD.1 | Separate Apple DAV services and constrained partition discovery |
 | 2026-10-17 | ICLOUD.2 | Advertised IMAP SASL PLAIN, bounded exchanges and secret redaction |
+
+| 2026-10-17 | ICLOUD.3 | Keep dialogs above the blocking overlay; pointer-entry regression in both themes |

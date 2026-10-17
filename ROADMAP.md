@@ -2,7 +2,7 @@
 
 **Stage: early alpha** · next: beta, as [`CONTEXT.md`](CONTEXT.md) defines it, by the plan in [`docs/plans/roadmap-reset.md`](docs/plans/roadmap-reset.md)
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-17 · **Change:** minor (local ICLOUD.2: advertised IMAP SASL PLAIN password sign-in) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-17 · **Change:** minor (local ICLOUD.3: keep setup fields above the modal overlay) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
 
 MailCraft aims for complete parity with Microsoft Outlook, then goes further on speed, openness,
 privacy and agent control. This page is the summary; the assessment is
@@ -48,6 +48,10 @@ Microsoft Graph for mail; rich-text replies; sign-ins remembered on Linux; messa
 when needed; system notifications and Copy diagnostics; then a beta run with testers.
 
 ## Progress log
+Local setup input fix (ICLOUD.3, 2026-10-17): dialogs stay above their blocking overlay,
+including after an outside click. Pointer-driven password entry and Connect are covered in
+both themes; real iCloud authentication and synchronization still need verification.
+
 Local iCloud sign-in update (ICLOUD.2, 2026-10-17): password accounts use advertised
 IMAP SASL PLAIN, including SASL-IR, with LOGIN retained for servers that do not advertise it.
 Refused credentials are not retried with another method. Live iCloud verification is pending.
@@ -63,6 +67,7 @@ See [automatic-setup.md](docs/automatic-setup.md) for supported discovery and re
 
 | Date | What landed |
 |---|---|
+| 2026-10-17 | ICLOUD.3 (local build): keep dialogs above their scrim; pointer-entry regression in both themes |
 | 2026-10-17 | ICLOUD.2 (local build): advertised IMAP SASL PLAIN and bounded challenge handling; live iCloud sign-in remains to be verified |
 | 2026-10-17 | ICLOUD.1 (local build): automatic iCloud mail/calendar/contact setup; distinct DAV origins, Apple partition bounds and app-specific-password guidance |
 | 2026-10-17 | AUTO.1 (local build): automatic Despres Connect mail/calendar/contact setup and encrypted SRV discovery; shared password in OS credential store; manual fallback for unsupported providers |

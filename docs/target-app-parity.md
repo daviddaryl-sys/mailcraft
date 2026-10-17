@@ -1,6 +1,10 @@
 # MailCraft vs Outlook: the assessment
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-17 · **Change:** minor (local ICLOUD.2: advertised IMAP SASL PLAIN password sign-in) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-17 · **Change:** minor (local ICLOUD.3: keep setup fields above the modal overlay) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
+
+Local setup input fix (ICLOUD.3, 2026-10-17): dialogs stay above their blocking overlay,
+including after an outside click. Pointer-driven password entry and Connect are covered in
+both themes; real iCloud authentication and synchronization still need verification.
 
 Local iCloud sign-in update (ICLOUD.2, 2026-10-17): password accounts use advertised
 IMAP SASL PLAIN, including SASL-IR, with LOGIN retained for servers that do not advertise it.
@@ -81,3 +85,5 @@ pictures and basic layout), #7 (at least rich replies), #9 and #11.
 | 2026-10-17 | minor | ICLOUD.1: separate Apple DAV setup and limits |
 
 | 2026-10-17 | minor | ICLOUD.2: advertised IMAP SASL PLAIN; live iCloud sign-in pending |
+
+| 2026-10-17 | minor | ICLOUD.3: dialog input remains reachable after an outside click |
