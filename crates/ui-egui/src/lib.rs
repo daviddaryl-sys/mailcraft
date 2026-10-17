@@ -989,8 +989,9 @@ impl MailApp {
         };
         // An account sent to other servers (mail or DAV) takes no password or sign-in along: what
         // was given was for the old ones, and a script or an agent must not be able to redirect it.
-        let servers =
-            |app: &Self, account: Id| app.session.mailbox.account(account).map(|a| (a.incoming.clone(), a.outgoing.clone(), a.dav_url.clone()));
+        let servers = |app: &Self, account: Id| {
+            app.session.mailbox.account(account).map(|a| (a.incoming.clone(), a.outgoing.clone(), a.dav_url.clone(), a.carddav_url.clone()))
+        };
         let moving =
             if id == "account.edit" { params.get("id").and_then(Value::as_u64).map(|account| (account, servers(self, account))) } else { None };
         let r = self.session.run(id, &params).map_err(|e| e.to_string());
