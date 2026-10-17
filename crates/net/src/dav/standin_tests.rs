@@ -423,3 +423,30 @@ fn new_personal_appointments_use_a_stable_uid_and_server_calendar() {
     assert!(s.items.contains_key(&format!("{CAL}new-personal-appointment.ics")));
     assert_eq!(s.writes.len(), 1);
 }
+
+#[test]
+fn an_unreadable_new_item_is_skipped_without_stalling_the_account() {
+    let fake = Fake::new();
+    // A journal entry: kept on the server, never shown here, and no reason to stop the rest.
+    let journal = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VJOURNAL\r\nUID:journal-1\r\nDTSTART:20261017T100000Z\r\nSUMMARY:Notes\r\nEND:VJOURNAL\r\nEND:VCALENDAR\r\n";
+    fake.state.lock().unwrap().items.insert(format!("{CAL}journal.ics"), (1, journal.into()));
+    let mut m = fake.mailbox();
+    let d = fake.sync(&m, true);
+    assert!(d.complete, "{:?}", d.errors);
+    assert_eq!(d.collections.len(), 2);
+    assert!(d.errors.iter().any(|e| e.contains("left on the server")), "{:?}", d.errors);
+    assert_eq!(d.resources.len(), 2);
+    assert!(!d.resources.iter().any(|r| r.href.ends_with("journal.ics")));
+    // (`adopt` takes a run with no errors: this one's only error is the skipped item.)
+    let Download { collections, resources, .. } = d;
+    adopt(&mut m, Download { complete: true, collections, resources, ..Default::default() });
+    // Writes still go out, and the server's journal entry is untouched.
+    let contact = *m.contacts.keys().next().unwrap();
+    m.contact_mut(contact).unwrap().display_name = "Edited past the journal".into();
+    let d = fake.sync(&m, false);
+    assert!(d.complete, "{:?}", d.errors);
+    assert_eq!(d.uploaded, 1);
+    let s = fake.state.lock().unwrap();
+    assert_eq!(s.items[&format!("{CAL}journal.ics")].1, journal);
+    assert_eq!(s.writes.len(), 1);
+}

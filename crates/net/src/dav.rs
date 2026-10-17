@@ -299,6 +299,27 @@ fn strong_etag(etag: &str) -> Result<(), String> {
     }
     Ok(())
 }
+/// Why one server item couldn't be brought in. An item new to MailCraft that it can't read is
+/// left on the server untouched and skipped; anything else stops the download.
+struct Failure {
+    message: String,
+    unreadable: bool,
+}
+impl Failure {
+    fn unreadable(message: String) -> Self {
+        Self { message: format!("A server item MailCraft can't read was left on the server: {message}"), unreadable: true }
+    }
+}
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self { message, unreadable: false }
+    }
+}
+impl From<&str> for Failure {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
 fn origin(account: u64, href: &str, etag: &str) -> Origin {
     Origin { account, id: href.into(), change_key: etag.into(), ..Default::default() }
 }
@@ -472,7 +493,7 @@ pub fn sync(request: Request) -> Download {
             let old: Vec<_> = result.before.iter().filter(|r| r.collection == collection.href).cloned().collect();
             for (href, etag) in &inventory {
                 let before = old.iter().find(|r| r.href == *href);
-                let attempt = || -> Result<Option<Resource>, String> {
+                let attempt = || -> Result<Option<Resource>, Failure> {
                     let current = before.map(|r| local(r, &request.mailbox));
                     if let (Some(before), Some(current)) = (before, current.as_ref())
                         && dirty(before, current)
@@ -535,7 +556,9 @@ pub fn sync(request: Request) -> Download {
                     if client.etag(href)? != *etag {
                         return Err("DAV item changed during download; retry required".into());
                     }
-                    decode(collection, href, etag, raw, before, zone).map(Some)
+                    decode(collection, href, etag, raw, before, zone)
+                        .map(Some)
+                        .map_err(|e| if before.is_none() { Failure::unreadable(e) } else { e.into() })
                 };
                 match attempt() {
                     Ok(mut value) => {
@@ -563,11 +586,11 @@ pub fn sync(request: Request) -> Download {
                             resources.push(value);
                         }
                     }
-                    Err(error) => {
-                        result.errors.push(error);
+                    Err(failure) => {
+                        result.errors.push(failure.message);
                         if let Some(before) = before {
                             resources.push(before.clone());
-                        } else {
+                        } else if !failure.unreadable {
                             return Err("DAV download incomplete; existing items retained".into());
                         }
                     }

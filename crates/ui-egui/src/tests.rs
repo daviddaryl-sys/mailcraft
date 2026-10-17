@@ -596,6 +596,24 @@ fn the_system_remembers_passwords_and_sign_ins_only_when_wanted() {
     assert!(kept("password:avery@mail.example").is_some());
     b.execute("account.remove", json!({"id": plain})).unwrap();
     assert_eq!(kept("password:avery@mail.example"), None);
+
+    // An account sent to other servers takes no password along, whoever runs the edit: a script
+    // or an agent can't redirect what was given for the old ones. Other edits keep it.
+    let moved = b.execute("account.add", json!({"email": "sky@mail.example", "incoming": {"host": "imap.mail.example"}})).unwrap()["id"].as_u64();
+    let moved = moved.unwrap();
+    for change in [json!({"davUrl": "https://dav.elsewhere.example/dav/"}), json!({"incoming": {"host": "imap.elsewhere.example"}})] {
+        b.execute("ui.sync", json!({"account": moved, "password": "pw-three"})).unwrap();
+        b.poll_sync();
+        b.execute("account.edit", json!({"id": moved, "displayName": "Sky"})).unwrap();
+        assert_eq!(kept("password:sky@mail.example").as_deref(), Some("pw-three"));
+        let mut edit = change.clone();
+        edit["id"] = json!(moved);
+        b.execute("account.edit", edit).unwrap();
+        assert_eq!(kept("password:sky@mail.example"), None, "{change}");
+        assert_eq!(b.execute("ui.sync", json!({"account": moved})).unwrap()["pending"], "password", "{change}");
+        assert!(b.execute("ui.davSync", json!({"account": moved})).is_err());
+        b.dialog = None;
+    }
 }
 
 /// A system whose credential store can't be used (on Linux, no Secret Service running, or one
