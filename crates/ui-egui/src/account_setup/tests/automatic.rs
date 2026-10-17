@@ -32,6 +32,28 @@ fn found() -> provider::Discovery {
     }
 }
 #[test]
+fn icloud_uses_one_app_password_for_separate_calendar_contacts_and_mail() {
+    let mut a = app(false);
+    let tried = checks(&mut a, Some(Ok(())));
+    let mail = syncs(&mut a);
+    let dav = dav_jobs(&mut a);
+    let mut h = open(a, json!({}));
+    connect(&mut h, "setup-check@icloud.com");
+    assert!(says(&h, "Apple app-specific password") && says(&h, "Create an Apple app-specific password"));
+    wizard_mut(&mut h).dav_username = "apple-sign-in@example.org".into();
+    type_password(&mut h);
+    press(&mut h, Key::Enter);
+    assert_eq!(page(&h), Some(Page::Done));
+    let account = &h.state().session.mailbox.accounts[0];
+    assert_eq!(account.dav_url, "https://caldav.icloud.com/");
+    assert_eq!(account.carddav_url, "https://contacts.icloud.com/");
+    assert_eq!(account.dav_login(), "apple-sign-in@example.org");
+    assert_eq!(tried.lock().unwrap()[0].0.carddav_url, account.carddav_url);
+    assert_eq!(mail.lock().unwrap()[0].2, TYPED);
+    assert_eq!(*dav.lock().unwrap(), [(account.id, TYPED.into(), true)]);
+    assert!(!serde_json::to_string(&h.state().session.mailbox).unwrap().contains(TYPED));
+}
+#[test]
 fn email_and_one_password_start_mail_calendar_and_contacts_together() {
     let mut a = app(false);
     let asked = discoveries(&mut a, found());

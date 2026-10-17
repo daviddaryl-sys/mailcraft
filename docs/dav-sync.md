@@ -1,6 +1,6 @@
 # CalDAV and CardDAV in the local MailCraft build
 
-This original implementation adds a DAV connection to a password-based mail account. It uses the existing OS credential store, and never writes passwords into the mailbox file. It does not implement Exchange ActiveSync.
+This original implementation adds shared or separate DAV connections to a password-based mail account. It uses the existing OS credential store, and never writes passwords into the mailbox file. It does not implement Exchange ActiveSync.
 
 ## Connection
 
@@ -23,7 +23,7 @@ Account Settings has an optional **Calendar and contacts (DAV URL)** field. For 
 - Meeting creation, edits, deletion and replies involving ORGANIZER or ATTENDEE are blocked because a DAV server may automatically send invitations/cancellations. Use Despres Connect for meetings.
 - Edit detached recurrence instances, move appointments between server calendars, and introduce a new event time zone in Despres Connect. Whole personal recurring series and their supported fields can be edited when stored as one VEVENT.
 - Tasks, address-book/calendar creation and rename, attachments, delegation, free/busy and server-side meeting scheduling are not implemented by this DAV connection.
-- A configured HTTPS DAV context URL is required. Redirects and cross-origin principal/home/resource URLs are refused; credentials never follow them. This has not established iCloud compatibility: iCloud may need separately configured calendar/contact hosts and explicit handling of its service redirects. Its IMAP preset already exists independently.
+- A configured HTTPS DAV context URL is required, with an optional separate CardDAV URL and DAV login. iCloud setup supplies both roots. Read redirects and hrefs are restricted to the corresponding Apple service and its numeric partition hosts over HTTPS/443, with normal certificate validation. Generic cross-origin hrefs/redirects and all write redirects remain refused. Separate endpoints use absolute resource identifiers to avoid collisions; the existing shared Despres connection retains its relative identifiers. See [icloud-setup.md](icloud-setup.md) for authentication and verification status.
 - Limits: 256 collections, 20,000 resources, 2 MiB per document, 16 MiB per XML reply, 64 MiB raw DAV data per account. Unsupported input is retained rather than silently rewritten.
 
 ## Verification

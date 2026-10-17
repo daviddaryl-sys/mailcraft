@@ -1,6 +1,11 @@
 # Where MailCraft falls short of Outlook
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-17 · **Change:** minor (local AUTO.1: unified Despres Connect account setup; domain-only SRV discovery) · **Target:** Microsoft Outlook (Microsoft 365)
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-17 · **Change:** minor (local ICLOUD.1: iCloud mail, calendar and contacts setup; separate DAV origins) · **Target:** Microsoft Outlook (Microsoft 365)
+
+Local iCloud build (ICLOUD.1, 2026-10-17): separate CalDAV/CardDAV endpoints, Apple app-specific
+password guidance and constrained Apple partition discovery. Verification status and limits are
+in [icloud-setup.md](icloud-setup.md).
+
 
 Local Despres Connect build (AUTO.1, 2026-10-17): email-first setup carries the shared DAV URL
 with mail settings, checks all three services with one credential, and starts their downloads.
@@ -73,3 +78,5 @@ done similar work in this code base.
 | 2026-10-15 | minor | Gap 2 and rough edges: behind the switch for testing, a Microsoft account's folders are kept in step through Microsoft Graph by server id (R3.1); `Mail.ReadWrite` is asked for that account only |
 
 | 2026-10-17 | minor | AUTO.1 local account setup; explicit DAV/provider limits |
+
+| 2026-10-17 | minor | ICLOUD.1: separate Apple DAV setup and limits |

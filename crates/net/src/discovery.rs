@@ -42,9 +42,14 @@ fn settings(mx: Vec<String>, services: &[Option<Service>]) -> Discovery {
     };
     let dav = |s: &Service| s.path.as_ref().map(|path| format!("https://{}:{}{path}", s.host, s.port));
     match (at(3).and_then(dav), at(4).and_then(dav)) {
-        (Some(cal), Some(book)) if cal == book => found.dav_url = cal,
+        (Some(cal), Some(book)) => {
+            if cal != book {
+                found.carddav_url = book;
+            }
+            found.dav_url = cal;
+        }
         (None, None) => {}
-        _ => found.note = "Mail settings were checked. Calendar and contacts need a shared DAV URL in Change account settings.".into(),
+        _ => found.note = "Mail settings were checked. Calendar and contacts need their DAV URLs in Change account settings.".into(),
     }
     found
 }
@@ -73,7 +78,7 @@ mod tests {
         assert!(found.note.is_empty());
     }
     #[test]
-    fn separate_or_missing_dav_services_never_claim_all_three_connected() {
+    fn separate_dav_services_keep_both_origins_and_missing_services_remain_manual() {
         let found = settings(
             vec![],
             &[
@@ -84,7 +89,9 @@ mod tests {
                 service("people.example.org", 443, Some("/dav/")),
             ],
         );
-        assert!(found.dav_url.is_empty() && !found.note.is_empty());
+        assert_eq!(found.dav_url, "https://cal.example.org:443/dav/");
+        assert_eq!(found.carddav_url, "https://people.example.org:443/dav/");
+        assert!(found.note.is_empty());
         assert_eq!(found.outgoing.unwrap().security, Security::StartTls);
         assert!(settings(vec![], &[]).dav_url.is_empty());
         assert!(discover("person@example.org").is_err());

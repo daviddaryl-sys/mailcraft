@@ -78,6 +78,21 @@ fn merge_does_not_duplicate_contacts_and_respects_remote_updates() {
     assert_eq!(s.mailbox.contacts.values().next().unwrap().display_name, "Server edit");
 }
 #[test]
+fn changed_contact_endpoint_or_login_discards_an_in_flight_download() {
+    let mut s = seeded();
+    let account = s.mailbox.accounts[0].id;
+    let d = update(&s, "Stale card endpoint", false);
+    s.mailbox.account_mut(account).unwrap().carddav_url = "https://people.example.test/".into();
+    apply(&mut s, d);
+    assert_eq!(s.mailbox.contacts.values().next().unwrap().display_name, "Original");
+    s.mailbox.account_mut(account).unwrap().carddav_url.clear();
+    let mut d = update(&s, "Stale identity", false);
+    d.login = Some(s.mailbox.account(account).unwrap().dav_login().into());
+    s.mailbox.account_mut(account).unwrap().dav_username = "other@example.test".into();
+    apply(&mut s, d);
+    assert_eq!(s.mailbox.contacts.values().next().unwrap().display_name, "Original");
+}
+#[test]
 fn concurrent_edits_keep_the_old_etag_and_require_conflict_resolution() {
     let mut s = seeded();
     let d = update(&s, "Server edit", false);

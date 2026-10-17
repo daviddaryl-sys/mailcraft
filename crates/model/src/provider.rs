@@ -20,6 +20,7 @@ pub struct Preset {
     pub note: &'static str,
     /// A combined CalDAV/CardDAV context, when the provider publishes one.
     pub dav_url: &'static str,
+    pub carddav_url: &'static str,
 }
 
 /// Domain-only discovery results. No identity or credential belongs in this data.
@@ -29,6 +30,7 @@ pub struct Discovery {
     pub incoming: Option<Server>,
     pub outgoing: Option<Server>,
     pub dav_url: String,
+    pub carddav_url: String,
     pub note: String,
 }
 
@@ -40,7 +42,29 @@ fn server(host: &str, port: u16, security: Security) -> Server {
 }
 
 fn with_password(service: &'static str, imap: &str, smtp: (&str, u16, Security), note: &'static str) -> Preset {
-    Preset { service, oauth: None, incoming: server(imap, 993, Security::Tls), outgoing: server(smtp.0, smtp.1, smtp.2), note, dav_url: "" }
+    Preset {
+        service,
+        oauth: None,
+        incoming: server(imap, 993, Security::Tls),
+        outgoing: server(smtp.0, smtp.1, smtp.2),
+        note,
+        dav_url: "",
+        carddav_url: "",
+    }
+}
+
+/// Apple publishes separate calendar and contacts services. The same app-specific password
+/// is used, with TLS and a service-specific allowlist for authenticated partition redirects.
+fn icloud() -> Preset {
+    let mut p = with_password(
+        "iCloud",
+        "imap.mail.me.com",
+        ("smtp.mail.me.com", 587, Security::StartTls),
+        "Use an Apple app-specific password, not your Apple Account password. If your Apple Account sign-in differs, enter it in Change account settings.",
+    );
+    p.dav_url = "https://caldav.icloud.com/";
+    p.carddav_url = "https://contacts.icloud.com/";
+    p
 }
 
 /// Outlook.com (`consumer`) or Microsoft 365 work and school mail.
@@ -54,6 +78,7 @@ pub fn microsoft(consumer: bool) -> Preset {
         outgoing: server(smtp, 587, Security::StartTls),
         note: MICROSOFT,
         dav_url: "",
+        carddav_url: "",
     }
 }
 
@@ -91,10 +116,11 @@ pub fn by_domain(domain: &str) -> Option<Preset> {
             incoming: server("outlook.despresai.com", 9933, tls),
             outgoing: server("mail.despresai.com", 587, starttls),
             dav_url: "https://outlook-test.computerhelpexpert.co.uk/dav/",
+            carddav_url: "",
             note: "Mail, calendar and contacts use your Despres Connect sign-in.",
         },
         "gmail.com" | "googlemail.com" => with_password("Gmail", "imap.gmail.com", ("smtp.gmail.com", 465, tls), APP_PASSWORD),
-        "icloud.com" | "me.com" | "mac.com" => with_password("iCloud", "imap.mail.me.com", ("smtp.mail.me.com", 587, starttls), APP_PASSWORD),
+        "icloud.com" | "me.com" | "mac.com" => icloud(),
         "fastmail.com" | "fastmail.fm" => with_password("Fastmail", "imap.fastmail.com", ("smtp.fastmail.com", 465, tls), APP_PASSWORD),
         "aol.com" => with_password("AOL", "imap.aol.com", ("smtp.aol.com", 465, tls), APP_PASSWORD),
         "zoho.com" | "zohomail.com" => with_password("Zoho", "imap.zoho.com", ("smtp.zoho.com", 465, tls), ""),
@@ -117,7 +143,7 @@ pub fn by_mx(host: &str) -> Option<Preset> {
     }
     // The host itself or anything under it, never a look-alike (`evilgoogle.com`).
     let under = |parent: &str| host == parent || host.ends_with(&format!(".{parent}"));
-    let (tls, starttls) = (Security::Tls, Security::StartTls);
+    let tls = Security::Tls;
     if under("olc.protection.outlook.com") {
         return Some(microsoft(true));
     }
@@ -131,7 +157,7 @@ pub fn by_mx(host: &str) -> Option<Preset> {
         return Some(with_password("Yahoo", "imap.mail.yahoo.com", ("smtp.mail.yahoo.com", 465, tls), APP_PASSWORD));
     }
     if under("mail.icloud.com") {
-        return Some(with_password("iCloud", "imap.mail.me.com", ("smtp.mail.me.com", 587, starttls), APP_PASSWORD));
+        return Some(icloud());
     }
     if under("messagingengine.com") {
         return Some(with_password("Fastmail", "imap.fastmail.com", ("smtp.fastmail.com", 465, tls), APP_PASSWORD));
@@ -170,6 +196,7 @@ pub fn guess(domain: &str) -> Preset {
         outgoing: server(&format!("smtp.{domain}"), 587, Security::StartTls),
         note: "",
         dav_url: "",
+        carddav_url: "",
     }
 }
 

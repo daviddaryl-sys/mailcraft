@@ -14,7 +14,7 @@ fn status(s: &mut Session, v: &Value) -> CmdResult {
     let account = p::req_id(v, "account")?;
     let a = s.mailbox.account(account).ok_or_else(|| bad("No such account"))?;
     Ok(
-        json!({"account":account,"url":a.dav_url,"pending":crate::dav::waiting(&s.mailbox,account),"collections":s.mailbox.dav_collections.iter().filter(|c|c.account==account).collect::<Vec<_>>(),"resources":s.mailbox.dav_resources.iter().filter(|r|r.account==account).map(|r|json!({"href":r.href,"contacts":r.contacts.iter().map(|c|c.id).collect::<Vec<_>>(),"events":r.events.iter().map(|e|e.id).collect::<Vec<_>>()})).collect::<Vec<_>>()}),
+        json!({"account":account,"url":a.dav_url,"carddavUrl":a.carddav_url,"pending":crate::dav::waiting(&s.mailbox,account),"collections":s.mailbox.dav_collections.iter().filter(|c|c.account==account).collect::<Vec<_>>(),"resources":s.mailbox.dav_resources.iter().filter(|r|r.account==account).map(|r|json!({"href":r.href,"contacts":r.contacts.iter().map(|c|c.id).collect::<Vec<_>>(),"events":r.events.iter().map(|e|e.id).collect::<Vec<_>>()})).collect::<Vec<_>>()}),
     )
 }
 fn local_calendar(s: &mut Session) -> u64 {
@@ -68,7 +68,10 @@ fn use_server(s: &mut Session, v: &Value) -> CmdResult {
 }
 fn disconnect(s: &mut Session, v: &Value) -> CmdResult {
     let account = p::req_id(v, "account")?;
-    s.mailbox.account_mut(account)?.dav_url.clear();
+    let a = s.mailbox.account_mut(account)?;
+    a.dav_url.clear();
+    a.carddav_url.clear();
+    a.dav_username.clear();
     for contact in s.mailbox.contacts.values_mut() {
         let c = std::sync::Arc::make_mut(contact);
         if c.origin.account == account {

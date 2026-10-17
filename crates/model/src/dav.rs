@@ -38,6 +38,8 @@ pub struct Request {
 pub struct Download {
     pub account: Id,
     pub url: String,
+    pub carddav_url: String,
+    pub login: Option<String>,
     pub before: Vec<Resource>,
     pub snapshots: Vec<Resource>,
     pub written: Vec<String>,

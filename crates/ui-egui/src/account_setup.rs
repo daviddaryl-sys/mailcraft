@@ -312,6 +312,7 @@ pub struct Preset {
     incoming: ServerFields,
     outgoing: ServerFields,
     dav_url: String,
+    carddav_url: String,
     /// Something the owner should know before connecting; may be empty.
     note: String,
 }
@@ -331,6 +332,7 @@ impl Preset {
             outgoing: ServerFields::read(v.get("outgoing")),
             note: text("note", 300),
             dav_url: text("davUrl", 2000),
+            carddav_url: text("carddavUrl", 2000),
         }
     }
 }
@@ -364,6 +366,8 @@ pub struct AccountSetup {
     oauth: Option<OAuth>,
     username: String,
     dav_url: String,
+    carddav_url: String,
+    dav_username: String,
     incoming: ServerFields,
     outgoing: ServerFields,
     /// The servers are shown on the password page.
@@ -462,6 +466,8 @@ impl AccountSetup {
             oauth: None,
             username: String::new(),
             dav_url: String::new(),
+            carddav_url: String::new(),
+            dav_username: String::new(),
             incoming: ServerFields::default(),
             outgoing: ServerFields::default(),
             settings_open: false,
@@ -522,6 +528,8 @@ impl AccountSetup {
         w.name = line(&a.display_name, LINE);
         w.username = line(&a.username, LINE);
         w.dav_url = a.dav_url.clone();
+        w.carddav_url = a.carddav_url.clone();
+        w.dav_username = a.dav_username.clone();
         w.incoming = ServerFields::of(a.incoming.as_ref());
         w.outgoing = ServerFields::of(a.outgoing.as_ref());
         if let Some(oauth) = &a.oauth {
@@ -573,6 +581,12 @@ impl AccountSetup {
         let mut m = object(json!({"email": email, "displayName": name, "username": self.login(email)}));
         if !self.dav_url.trim().is_empty() {
             m.insert("davUrl".into(), json!(self.dav_url.trim()));
+        }
+        if !self.carddav_url.trim().is_empty() {
+            m.insert("carddavUrl".into(), json!(self.carddav_url.trim()));
+        }
+        if !self.dav_username.trim().is_empty() {
+            m.insert("davUsername".into(), json!(self.dav_username.trim()));
         }
         for (key, server) in [("incoming", &self.incoming), ("outgoing", &self.outgoing)] {
             if let Some(v) = server.value() {
@@ -637,6 +651,8 @@ impl AccountSetup {
             outgoing: self.outgoing.server(),
             username: self.login(email),
             dav_url: self.dav_url.trim().to_string(),
+            carddav_url: self.carddav_url.trim().to_string(),
+            dav_username: self.dav_username.trim().to_string(),
             oauth: self.oauth.clone(),
             ..Default::default()
         })
@@ -656,6 +672,8 @@ impl AccountSetup {
             "displayName": self.name.trim(),
             "username": self.username.trim(),
             "davUrl": self.dav_url.trim(),
+            "carddavUrl": self.carddav_url.trim(),
+            "davUsername": self.dav_username.trim(),
             "incoming": self.incoming.value(),
             "outgoing": self.outgoing.value(),
         }));
@@ -712,6 +730,8 @@ impl AccountSetup {
         self.incoming = preset.incoming;
         self.outgoing = preset.outgoing;
         self.dav_url = preset.dav_url;
+        self.carddav_url = preset.carddav_url;
+        self.dav_username.clear();
         self.settings_open = false;
         self.guessed = false;
     }
@@ -1092,6 +1112,7 @@ impl AccountSetup {
                             preset.outgoing = ServerFields::of(Some(&server));
                         }
                         preset.dav_url = found.dav_url;
+                        preset.carddav_url = found.carddav_url;
                         preset.note = found.note;
                         preset.known = complete_mail;
                     }
@@ -1367,6 +1388,9 @@ impl AccountSetup {
             }
             if asks {
                 self.password_field(ui, pass, "");
+                if self.service == "iCloud" {
+                    ui.hyperlink_to(tl!("Create an Apple app-specific password"), "https://support.apple.com/en-us/102654");
+                }
                 note(ui, kept_where(app), t.text_dim);
             } else {
                 note(ui, tl!("This build can't connect to mail servers. The account can still be added."), t.text_dim);
@@ -1469,7 +1493,7 @@ impl AccountSetup {
 
     /// The password, masked. It is never shown, copied or spoken.
     fn password_field(&mut self, ui: &mut Ui, pass: &mut Pass, hint: &str) {
-        caption(ui, tl!("Password"), &pass.t);
+        caption(ui, if self.service == "iCloud" { tl!("Apple app-specific password") } else { tl!("Password") }, &pass.t);
         let edit = TextEdit::singleline(&mut self.password.0)
             .id(password_id())
             .password(true)
@@ -1488,10 +1512,28 @@ impl AccountSetup {
             ui,
             pass,
             "davUrl",
-            tl!("Calendar and contacts (DAV URL)"),
+            tl!("Calendar or shared DAV URL"),
             &mut self.dav_url,
             tl!("https://your-server/dav/ — uses the same sign-in"),
             2000,
+        );
+        field(
+            ui,
+            pass,
+            "carddavUrl",
+            tl!("Contacts URL (if separate)"),
+            &mut self.carddav_url,
+            tl!("Leave empty to use the shared DAV server"),
+            2000,
+        );
+        field(
+            ui,
+            pass,
+            "davUsername",
+            tl!("Apple Account / DAV sign-in (if different)"),
+            &mut self.dav_username,
+            tl!("Leave empty to use your mail sign-in"),
+            LINE,
         );
         server_row(ui, pass, tl!("Incoming mail (IMAP)"), "incoming", &mut self.incoming, "imap.example.org", (993, 143));
         server_row(ui, pass, tl!("Outgoing mail (SMTP)"), "outgoing", &mut self.outgoing, "smtp.example.org", (465, 587));

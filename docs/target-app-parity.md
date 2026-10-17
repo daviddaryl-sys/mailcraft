@@ -1,6 +1,11 @@
 # MailCraft vs Outlook: the assessment
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-17 · **Change:** minor (local AUTO.1: unified Despres Connect account setup; domain-only SRV discovery) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-17 · **Change:** minor (local ICLOUD.1: iCloud mail, calendar and contacts setup; separate DAV origins) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
+
+Local iCloud build (ICLOUD.1, 2026-10-17): separate CalDAV/CardDAV endpoints, Apple app-specific
+password guidance and constrained Apple partition discovery. Verification status and limits are
+in [icloud-setup.md](icloud-setup.md).
+
 
 Local Despres Connect build (AUTO.1, 2026-10-17): email-first setup carries the shared DAV URL
 with mail settings, checks all three services with one credential, and starts their downloads.
@@ -68,3 +73,5 @@ pictures and basic layout), #7 (at least rich replies), #9 and #11.
 | 2026-10-14 | minor | Marked out of date |
 
 | 2026-10-17 | minor | AUTO.1 local account setup; explicit DAV/provider limits |
+
+| 2026-10-17 | minor | ICLOUD.1: separate Apple DAV setup and limits |

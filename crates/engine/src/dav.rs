@@ -26,7 +26,9 @@ fn before_event(resources: &[Resource], id: u64) -> Option<&Event> {
 }
 /// Returns true only when persisted state changed. Discard replies for edited/removed accounts.
 pub fn apply(session: &mut Session, mut download: Download) -> Vec<String> {
-    if session.mailbox.account(download.account).is_none_or(|a| a.dav_url != download.url) {
+    if session.mailbox.account(download.account).is_none_or(|a| {
+        a.dav_url != download.url || a.carddav_url != download.carddav_url || download.login.as_ref().is_some_and(|login| login != a.dav_login())
+    }) {
         return Vec::new();
     }
     let mut conflicts = Vec::new();
@@ -187,7 +189,7 @@ pub fn waiting(mailbox: &mailcraft_model::Mailbox, account: u64) -> bool {
 /// Has an undo step changed this DAV account? Once synchronized, such steps are settled;
 /// unrelated mail undo steps are retained and rebased onto the downloaded DAV state.
 pub(crate) fn different(a: &mailcraft_model::Mailbox, b: &mailcraft_model::Mailbox, account: u64) -> bool {
-    a.account(account).map(|a| &a.dav_url) != b.account(account).map(|a| &a.dav_url)
+    a.account(account).map(|a| (&a.dav_url, &a.carddav_url, a.dav_login())) != b.account(account).map(|a| (&a.dav_url, &a.carddav_url, a.dav_login()))
         || !a.contacts.values().filter(|c| c.origin.account == account).eq(b.contacts.values().filter(|c| c.origin.account == account))
         || !a.events.values().filter(|e| e.origin.account == account).eq(b.events.values().filter(|e| e.origin.account == account))
         || !a.calendars.iter().filter(|c| c.origin.account == account).eq(b.calendars.iter().filter(|c| c.origin.account == account))
@@ -196,6 +198,8 @@ pub(crate) fn different(a: &mailcraft_model::Mailbox, b: &mailcraft_model::Mailb
 pub(crate) fn rebase_snapshot(snapshot: &mut mailcraft_model::Mailbox, latest: &mailcraft_model::Mailbox, account: u64) {
     if let (Some(old), Some(now)) = (snapshot.accounts.iter_mut().find(|a| a.id == account), latest.account(account)) {
         old.dav_url = now.dav_url.clone();
+        old.carddav_url = now.carddav_url.clone();
+        old.dav_username = now.dav_username.clone();
     } else {
         return;
     }

@@ -204,6 +204,12 @@ pub struct Account {
     /// Optional CalDAV/CardDAV discovery URL; uses this account's password.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub dav_url: String,
+    /// Separate CardDAV context; empty means the shared DAV context above.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub carddav_url: String,
+    /// Calendar/contact sign-in when different from the mail login; never a password.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub dav_username: String,
     /// The signature new messages start with (a [`Signature`] name; empty for none).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub signature: String,
@@ -287,6 +293,17 @@ impl Directory {
 }
 
 impl Account {
+    /// Calendar/contact login, falling back to the existing mail login.
+    pub fn dav_login(&self) -> &str {
+        if !self.dav_username.is_empty() {
+            &self.dav_username
+        } else if !self.username.is_empty() {
+            &self.username
+        } else {
+            &self.email
+        }
+    }
+
     /// The name of the signature replies and forwards start with (empty for none).
     pub fn reply_signature(&self) -> &str {
         self.reply_signature.as_deref().unwrap_or(&self.signature)

@@ -1,6 +1,7 @@
 //! CalDAV/CardDAV discovery and optimistic, conditional two-way synchronization.
 //! No redirects, cross-origin credentials, implicit scheduling, or unconditional overwrites.
 mod document;
+mod icloud;
 mod xml;
 use crate::http::{self, Url};
 use base64::Engine as _;
@@ -16,6 +17,10 @@ const PROPS: &str = "<d:displayname/><d:resourcetype/><d:current-user-privilege-
 struct Client {
     base: Url,
     auth: String,
+    apple: Option<icloud::Service>,
+    absolute: bool,
+    #[cfg(test)]
+    trusted_test_origins: Vec<Url>,
 }
 impl Client {
     fn new(url: &str, username: &str, password: &str) -> Result<Self, String> {
@@ -24,75 +29,126 @@ impl Client {
         }
         let base = Url::parse(url).map_err(|_| "DAV needs a valid HTTPS URL")?;
         safe_path(&base.path)?;
-        Ok(Self { base, auth: format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"))) })
+        let apple = icloud::Service::of(&base);
+        Ok(Self {
+            base,
+            apple,
+            absolute: apple.is_some(),
+            auth: format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"))),
+            #[cfg(test)]
+            trusted_test_origins: Vec::new(),
+        })
+    }
+    fn allowed(&self, url: &Url) -> bool {
+        if self.base.same_server(url) || self.apple.is_some_and(|apple| apple.allows(url)) {
+            return true;
+        }
+        #[cfg(test)]
+        if self.trusted_test_origins.iter().any(|origin| origin.same_server(url)) {
+            return true;
+        }
+        false
+    }
+    fn href(&self, url: &Url) -> String {
+        if self.absolute { full_url(url) } else { url.path.clone() }
     }
     fn url(&self, href: &str, relative: &str) -> Result<Url, String> {
+        let mut context = self.base.clone();
+        if relative.contains("://") {
+            context = self.url_at(relative, &self.base)?;
+        } else {
+            context.path = relative.into();
+        }
+        self.url_at(href, &context)
+    }
+    fn url_at(&self, href: &str, context: &Url) -> Result<Url, String> {
         let text = if href.contains("://") {
             href.to_string()
         } else {
             if href.starts_with("//") {
                 return Err("Cross-origin DAV href refused".into());
             }
-            let path = if href.starts_with('/') {
-                href.to_string()
+            let mut url = context.clone();
+            url.path = if href.starts_with('/') {
+                href.into()
             } else {
-                format!("{}{href}", relative.rsplit_once('/').map_or("/".into(), |(p, _)| format!("{p}/")))
+                format!("{}{href}", context.path.rsplit_once('/').map_or("/".into(), |(p, _)| format!("{p}/")))
             };
-            format!(
-                "{}://{}{}{}",
-                if self.base.secure { "https" } else { "http" },
-                if self.base.host.contains(':') { format!("[{}]", self.base.host) } else { self.base.host.clone() },
-                if self.base.port == 0 { String::new() } else { format!(":{}", self.base.port) },
-                path
-            )
+            full_url(&url)
         };
         let url = Url::parse(&text).map_err(|_| "Invalid DAV href")?;
-        if !self.base.same_server(&url) {
+        if !self.allowed(&url) {
             return Err("Cross-origin DAV href refused".into());
         }
         safe_path(&url.path)?;
         Ok(url)
     }
     fn call(&self, url: &Url, method: &str, body: Option<&str>, extra: &[(&str, &str)]) -> Result<http::Reply, String> {
-        if !self.base.same_server(url) {
-            return Err("Cross-origin DAV request refused".into());
+        self.call_at(url, method, body, extra).map(|(answer, _)| answer)
+    }
+    fn call_at(&self, first: &Url, method: &str, body: Option<&str>, extra: &[(&str, &str)]) -> Result<(http::Reply, Url), String> {
+        let mut url = first.clone();
+        let mut seen = HashSet::new();
+        for hop in 0..=5 {
+            if !self.allowed(&url) {
+                return Err("Cross-origin DAV request refused".into());
+            }
+            safe_path(&url.path)?;
+            if !seen.insert(full_url(&url)) {
+                return Err("DAV redirect loop refused".into());
+            }
+            let mut headers = vec![("Authorization", self.auth.as_str())];
+            headers.extend_from_slice(extra);
+            let answer = http::request(
+                &url,
+                &http::Request { method, headers: &headers, body, patience: Duration::from_secs(40), max_body: http::MAX_LARGE_BODY },
+            )
+            .map_err(|_| "DAV connection failed (network, TLS, timeout or response limit)".to_string())?;
+            let redirect = matches!(answer.status, 301 | 302 | 307 | 308) || (answer.status == 303 && method == "GET");
+            let can_follow = self.apple.is_some();
+            #[cfg(test)]
+            let can_follow = can_follow || !self.trusted_test_origins.is_empty();
+            if redirect && can_follow && matches!(method, "GET" | "PROPFIND") {
+                if hop == 5 {
+                    return Err("Too many DAV redirects".into());
+                }
+                url = self.url_at(answer.location.as_deref().ok_or("DAV redirect omitted its location")?, &url)?;
+                continue;
+            }
+            if !(200..300).contains(&answer.status) {
+                return Err(match answer.status {
+                    401 if self.apple.is_some() => "iCloud sign-in refused; use a valid Apple app-specific password".into(),
+                    401 => "DAV sign-in refused".into(),
+                    403 => "DAV server refused permission".into(),
+                    412 => "DAV conflict: the server copy changed; local edits are retained".into(),
+                    code => format!("DAV HTTP {code}; no unconditional retry was made"),
+                });
+            }
+            let final_status = match method {
+                "GET" => answer.status == 200,
+                "PUT" => matches!(answer.status, 200 | 201 | 204),
+                "DELETE" => matches!(answer.status, 200 | 204),
+                "PROPFIND" => answer.status == 207,
+                _ => true,
+            };
+            if !final_status {
+                return Err("DAV change is pending or the response is incomplete; local edits retained".into());
+            }
+            return Ok((answer, url));
         }
-        let mut headers = vec![("Authorization", self.auth.as_str())];
-        headers.extend_from_slice(extra);
-        let answer =
-            http::request(url, &http::Request { method, headers: &headers, body, patience: Duration::from_secs(40), max_body: http::MAX_LARGE_BODY })
-                .map_err(|_| "DAV connection failed (network, TLS, timeout or response limit)".to_string())?;
-        if !(200..300).contains(&answer.status) {
-            return Err(match answer.status {
-                401 => "DAV sign-in refused".into(),
-                403 => "DAV server refused permission".into(),
-                412 => "DAV conflict: the server copy changed; local edits are retained".into(),
-                s => format!("DAV HTTP {s}; no unconditional retry was made"),
-            });
-        }
-        let final_status = match method {
-            "GET" => answer.status == 200,
-            "PUT" => matches!(answer.status, 200 | 201 | 204),
-            "DELETE" => matches!(answer.status, 200 | 204),
-            "PROPFIND" => answer.status == 207,
-            _ => true,
-        };
-        if !final_status {
-            return Err("DAV change is pending or the response is incomplete; local edits retained".into());
-        }
-        Ok(answer)
+        Err("Too many DAV redirects".into())
     }
     fn prop(&self, url: &Url, depth: &str) -> Result<xml::Node, String> {
+        self.prop_at(url, depth).map(|(node, _)| node)
+    }
+    fn prop_at(&self, url: &Url, depth: &str) -> Result<(xml::Node, Url), String> {
         let body =
             format!("<?xml version=\"1.0\"?><d:propfind xmlns:d=\"DAV:\" xmlns:c=\"{C}\" xmlns:a=\"{A}\"><d:prop>{PROPS}</d:prop></d:propfind>");
-        let reply = self.call(url, "PROPFIND", Some(&body), &[("Depth", depth), ("Content-Type", "application/xml; charset=utf-8")])?;
-        if reply.status != 207 {
-            return Err("DAV PROPFIND did not return multistatus".into());
-        }
-        xml::parse(&reply.body)
+        let (reply, at) = self.call_at(url, "PROPFIND", Some(&body), &[("Depth", depth), ("Content-Type", "application/xml; charset=utf-8")])?;
+        Ok((xml::parse(&reply.body)?, at))
     }
     fn discover(&self, account: u64) -> Result<Vec<Collection>, String> {
-        let root = self.prop(&self.base, "0")?;
+        let (root, context) = self.prop_at(&self.base, "0")?;
         let principal = root
             .children
             .iter()
@@ -102,13 +158,13 @@ impl Client {
             .and_then(|n| n.child(D, "href"))
             .map(|n| n.text.trim())
             .ok_or("DAV server did not identify a principal")?;
-        let principal = self.url(principal, &self.base.path)?;
-        let root = self.prop(&principal, "0")?;
+        let principal = self.url_at(principal, &context)?;
+        let (root, principal) = self.prop_at(&principal, "0")?;
         let mut homes = Vec::new();
         for p in root.children.iter().filter(|n| n.is(D, "response")).flat_map(xml::properties) {
             if p.is(C, "calendar-home-set") || p.is(A, "addressbook-home-set") {
                 for href in p.children.iter().filter(|n| n.is(D, "href")) {
-                    let url = self.url(href.text.trim(), &principal.path)?;
+                    let url = self.url_at(href.text.trim(), &principal)?;
                     if !homes.contains(&url) {
                         homes.push(url);
                     }
@@ -120,7 +176,7 @@ impl Client {
         }
         let mut collections = Vec::new();
         for home in homes {
-            let root = self.prop(&home, "1")?;
+            let (root, home) = self.prop_at(&home, "1")?;
             for row in root.children.iter().filter(|n| n.is(D, "response")) {
                 let props = xml::properties(row);
                 let calendar = props.iter().any(|n| n.is(D, "resourcetype") && n.has(C, "calendar"));
@@ -133,10 +189,11 @@ impl Client {
                 if !calendar && !contacts {
                     continue;
                 }
-                let href = self.url(row.value(D, "href"), &home.path)?.path;
-                if !href.starts_with(&home.path) || !href.ends_with('/') {
+                let at = self.url_at(row.value(D, "href"), &home)?;
+                if !at.same_server(&home) || !at.path.starts_with(&home.path) || !at.path.ends_with('/') {
                     return Err("DAV collection is outside its home".into());
                 }
+                let href = self.href(&at);
                 let name = props.iter().find(|n| n.is(D, "displayname")).map_or("Calendar", |n| n.text.trim());
                 let write = props
                     .iter()
@@ -154,22 +211,26 @@ impl Client {
     }
     fn inventory(&self, collection: &Collection) -> Result<BTreeMap<String, String>, String> {
         let url = self.url(&collection.href, &self.base.path)?;
-        let root = self.prop(&url, "1")?;
+        let (root, url) = self.prop_at(&url, "1")?;
         let mut items = BTreeMap::new();
         let mut self_seen = false;
         for row in root.children.iter().filter(|n| n.is(D, "response")) {
             if row.value(D, "href").is_empty() {
                 return Err("DAV inventory has no href".into());
             }
-            let path = self.url(row.value(D, "href"), &url.path)?.path;
-            if path == url.path {
+            let at = self.url_at(row.value(D, "href"), &url)?;
+            if !at.same_server(&url) {
+                return Err("DAV resource outside collection".into());
+            }
+            let path = self.href(&at);
+            if at.path == url.path {
                 if !xml::properties(row).iter().any(|p| p.is(D, "resourcetype") && p.has(D, "collection")) {
                     return Err("DAV collection listing is incomplete".into());
                 }
                 self_seen = true;
                 continue;
             }
-            if !path.starts_with(&collection.href) || path[collection.href.len()..].contains('/') {
+            if !at.path.starts_with(&url.path) || at.path.get(url.path.len()..).is_none_or(|tail| tail.contains('/')) {
                 return Err("DAV resource outside collection".into());
             }
             let props = xml::properties(row);
@@ -210,6 +271,11 @@ impl Client {
         strong_etag(&etag)?;
         Ok(etag)
     }
+}
+fn full_url(url: &Url) -> String {
+    let host = if url.host.contains(':') { format!("[{}]", url.host) } else { url.host.to_ascii_lowercase() };
+    let port = if url.port == 0 || (url.secure && url.port == 443) { String::new() } else { format!(":{}", url.port) };
+    format!("{}://{host}{port}{}", if url.secure { "https" } else { "http" }, url.path)
 }
 fn safe_path(path: &str) -> Result<(), String> {
     if !path.starts_with('/') || path.starts_with("//") || path.contains(['?', '#', '\\']) {
@@ -307,7 +373,7 @@ fn equivalent(a: &Resource, b: &Resource) -> bool {
 fn changed_body(old: &Resource, now: &Resource, zone: Zone) -> Result<String, String> {
     if old.contacts.is_empty() {
         if document::meeting(&old.raw) || now.events.iter().any(|e| e.organizer.is_some() || !e.attendees.is_empty()) {
-            return Err("DAV meeting edits are held to prevent automatic invitations; use Despres Connect".into());
+            return Err("DAV meeting edits are held to prevent automatic invitations; use your provider’s calendar app".into());
         }
         document::patch(&old.raw, &render_events(&old.events, zone, 0), &render_events(&now.events, zone, mailcraft_time::now()), "VEVENT")
     } else {
@@ -345,13 +411,37 @@ fn recover_created(resource: &mut Resource, mailbox: &Mailbox) -> Option<Resourc
 /// Authenticate and discover collections without reading items or making any changes. Used
 /// by Add Account after mail authentication, with the same in-memory credential.
 pub fn check_account(account: &mailcraft_model::Account, password: &str) -> Result<(), String> {
-    let username = if account.username.is_empty() { &account.email } else { &account.username };
-    let client = Client::new(&account.dav_url, username, password)?;
-    let collections = client.discover(account.id)?;
+    let clients = clients(account, password)?;
+    let collections = collections(&clients, account.id)?;
     if !collections.iter().any(|c| c.contacts) || !collections.iter().any(|c| !c.contacts) {
-        return Err("The sign-in did not expose both a calendar and an address book. Check the DAV URL or continue with mail only.".into());
+        return Err("The sign-in did not expose both a calendar and an address book. Check the DAV URLs or continue with mail only.".into());
     }
     Ok(())
+}
+fn clients(account: &mailcraft_model::Account, password: &str) -> Result<Vec<Client>, String> {
+    let separate = !account.carddav_url.is_empty() && account.carddav_url != account.dav_url;
+    let mut calendar = Client::new(&account.dav_url, account.dav_login(), password)?;
+    calendar.absolute |= separate;
+    let mut clients = vec![calendar];
+    if separate {
+        let mut contacts = Client::new(&account.carddav_url, account.dav_login(), password)?;
+        contacts.absolute = true;
+        clients.push(contacts);
+    }
+    Ok(clients)
+}
+fn collections(clients: &[Client], account: u64) -> Result<Vec<Collection>, String> {
+    let mut collections = Vec::new();
+    for (i, client) in clients.iter().enumerate() {
+        collections.extend(client.discover(account)?.into_iter().filter(|c| clients.len() == 1 || c.contacts == (i == 1)));
+        if collections.len() > 256 {
+            return Err("Too many DAV collections".into());
+        }
+    }
+    Ok(collections)
+}
+fn client_for<'a>(collection: &Collection, clients: &'a [Client]) -> Result<&'a Client, String> {
+    (if collection.contacts { clients.last() } else { clients.first() }).ok_or_else(|| "DAV connection is unavailable".into())
 }
 /// Run against the snapshot, returning checkpoints only for verified server representations.
 pub fn sync(request: Request) -> Download {
@@ -365,18 +455,20 @@ pub fn sync(request: Request) -> Download {
         return result;
     };
     result.url = account.dav_url.clone();
+    result.carddav_url = account.carddav_url.clone();
+    result.login = Some(account.dav_login().into());
     result.resources = result.before.clone();
     result.snapshots = result.before.iter().map(|r| local(r, &request.mailbox)).collect();
     let run = |result: &mut Download| -> Result<(), String> {
-        let username = if account.username.is_empty() { &account.email } else { &account.username };
-        let client = Client::new(&account.dav_url, username, &request.password)?;
+        let clients = clients(account, &request.password)?;
         let zone = Zone::named(&request.mailbox.zone).unwrap_or(Zone::LOCAL);
-        result.collections = client.discover(account.id)?;
+        result.collections = collections(&clients, account.id)?;
         // Obtain all inventories before any writes. A malformed/partial listing never prunes data.
-        let inventories = result.collections.iter().map(|c| client.inventory(c)).collect::<Result<Vec<_>, _>>()?;
+        let inventories = result.collections.iter().map(|c| client_for(c, &clients)?.inventory(c)).collect::<Result<Vec<_>, _>>()?;
         let mut resources = Vec::new();
         let mut size = 0usize;
         for (collection, inventory) in result.collections.iter().zip(inventories) {
+            let client = client_for(collection, &clients)?;
             let old: Vec<_> = result.before.iter().filter(|r| r.collection == collection.href).cloned().collect();
             for (href, etag) in &inventory {
                 let before = old.iter().find(|r| r.href == *href);
@@ -406,7 +498,9 @@ pub fn sync(request: Request) -> Download {
                         }
                         let deleting = current.contacts.is_empty() && current.events.is_empty();
                         if deleting && document::meeting(&before.raw) {
-                            return Err("DAV meeting deletion is held to prevent automatic cancellation mail; use Despres Connect".into());
+                            return Err(
+                                "DAV meeting deletion is held to prevent automatic cancellation mail; use your provider’s calendar app".into()
+                            );
                         }
                         let url = client.url(href, &collection.href)?;
                         if deleting {
@@ -536,7 +630,7 @@ pub fn sync(request: Request) -> Download {
                             return Err("New DAV item needs a stable UID".into());
                         }
                         if extension == "ics" && document::meeting(&body) {
-                            return Err("DAV meeting creation is held to prevent automatic invitations; use Despres Connect".into());
+                            return Err("DAV meeting creation is held to prevent automatic invitations; use your provider’s calendar app".into());
                         }
                         let href = format!("{}{}.{}", collection.href, http::encode(uid), extension);
                         let url = client.url(&href, &collection.href)?;
@@ -592,6 +686,41 @@ pub fn sync(request: Request) -> Download {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fake::FakeHttp;
+    #[test]
+    fn redirect_targets_are_checked_before_credentials_and_writes_are_never_redirected() {
+        let target = FakeHttp::answering(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nsafe".to_vec());
+        let redirect = format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {}\r\nContent-Length: 0\r\n\r\n", target.url("/home/"));
+        let source = FakeHttp::answering(redirect.as_bytes().to_vec());
+        let mut client = Client::new(&source.url("/"), "u", "fake-secret").unwrap();
+        assert!(client.call(&client.base, "GET", None, &[]).is_err());
+        assert_eq!(target.asked(), 0);
+        client.trusted_test_origins.push(Url::parse(&target.url("/")).unwrap());
+        let (reply, at) = client.call_at(&client.base, "GET", None, &[]).unwrap();
+        assert_eq!(reply.body, b"safe");
+        assert_eq!(at.path, "/home/");
+        assert!(target.request(0).contains("Authorization: Basic "));
+        assert!(client.call(&client.base, "PUT", Some("data"), &[("If-Match", "\"1\"")]).is_err());
+        assert_eq!(target.asked(), 1);
+        let foreign = FakeHttp::answering(redirect.as_bytes().to_vec());
+        let mut blocked = Client::new(&foreign.url("/"), "u", "fake-secret").unwrap();
+        blocked.trusted_test_origins.push(Url::parse(&source.url("/")).unwrap());
+        assert!(blocked.call(&blocked.base, "GET", None, &[]).is_err());
+        assert_eq!(target.asked(), 1);
+    }
+    #[test]
+    fn redirect_loops_stop_and_relative_hrefs_use_the_effective_partition() {
+        let source = FakeHttp::answering(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /loop\r\nContent-Length: 0\r\n\r\n".to_vec());
+        let mut c = Client::new(&source.url("/"), "u", "fake-secret").unwrap();
+        c.trusted_test_origins.push(c.base.clone());
+        assert!(c.call(&c.base, "PROPFIND", Some("xml"), &[]).unwrap_err().contains("loop"));
+        assert_eq!(source.asked(), 2);
+        let c = Client::new("https://caldav.icloud.com/", "u", "fake-secret").unwrap();
+        let shard = Url::parse("https://p43-caldav.icloud.com/123/home/").unwrap();
+        let at = c.url_at("calendar/", &shard).unwrap();
+        assert_eq!(c.href(&at), "https://p43-caldav.icloud.com/123/home/calendar/");
+        assert!(c.url_at("https://p43-contacts.icloud.com/123/home/", &shard).is_err());
+    }
     #[test]
     fn never_forwards_credentials_to_foreign_or_unsafe_hrefs() {
         let c = Client::new("https://example.test/dav/", "u", "secret").unwrap();

@@ -1,4 +1,4 @@
-# Automatic account setup in the Despres Connect build
+# Automatic account setup in the local MailCraft build
 
 Add Account asks for an email address, then a password or the provider's own sign-in. A known
 provider's settings take priority over DNS guesses. Despres Connect has a local profile for
@@ -14,17 +14,20 @@ detected before sign-in, rather than duplicated. The current account needs no re
 
 Unknown domains use domain-only DNS-over-HTTPS lookups for MX and encrypted service records:
 `_imaps._tcp`, `_submissions._tcp` (preferred over `_submission._tcp` with mandatory STARTTLS),
-`_caldavs._tcp` and `_carddavs._tcp`. DAV services must publish TXT `path` records naming the same
-HTTPS context. Lower SRV priority wins, with weighted choice at equal priority. Lookups are
+`_caldavs._tcp` and `_carddavs._tcp`. DAV services can publish TXT `path` records naming shared or separate
+HTTPS contexts. Known iCloud profiles use Apple’s advertised service roots without requiring TXT paths. Lower SRV priority wins, with weighted choice at equal priority. Lookups are
 bounded and run on background workers; only the domain goes to DNS, never an email local part
 or credential. Cancellation discards the result and never starts a sign-in.
 
-This version does not promise automatic setup for every provider. Separate calendar/contact
-origins, redirects through well-known endpoints, DAV providers without TXT paths and iCloud's
-service-specific authentication/discovery need additional support. Unknown/partial settings
-retain the manual setup path, and mail-only setup is identified on completion. Existing Microsoft
-OAuth handling is preserved. Automatic setup does not add meeting scheduling or tasks, nor
-ActiveSync/MAPI compatibility. Existing DAV limitations remain in [dav-sync.md](dav-sync.md).
+iCloud addresses (`icloud.com`, `me.com`, `mac.com`), iCloud selected manually and iCloud MX
+recognition now carry both Apple DAV roots. Use an app-specific password generated in the Apple
+Account security settings; two-factor authentication is required. An optional DAV sign-in field
+handles a different Apple Account login. See [icloud-setup.md](icloud-setup.md).
+
+Automatic setup is not universal. Generic well-known redirects and arbitrary cross-origin DAV
+hrefs remain refused. Missing DNS paths and unsupported provider behavior keep the manual setup
+path. Existing Microsoft OAuth is preserved. This feature does not add meetings, tasks or
+ActiveSync/MAPI. Existing DAV limits remain in [dav-sync.md](dav-sync.md).
 
 The Despres profile describes the deployment verified on 17 October 2026; update it deliberately
 when those endpoints change. This feature changes the local client, with no DNS/server changes.

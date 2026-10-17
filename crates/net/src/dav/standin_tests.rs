@@ -18,6 +18,7 @@ struct State {
     refuse: bool,
     broken: bool,
     pending: bool,
+    contacts_only: bool,
 }
 struct Fake {
     url: String,
@@ -86,13 +87,21 @@ impl Fake {
                     "PROPFIND" => {
                         let rows = if path == "/dav/" {
                             prop(path, "<d:current-user-principal><d:href>/dav/principals/u/</d:href></d:current-user-principal>")
+                        } else if path == "/dav/principals/u/" && s.contacts_only {
+                            prop(path, "<a:addressbook-home-set><d:href>/dav/calendars/u/</d:href></a:addressbook-home-set>")
                         } else if path == "/dav/principals/u/" {
                             prop(
                                 path,
                                 "<c:calendar-home-set><d:href>/dav/calendars/u/</d:href></c:calendar-home-set><a:addressbook-home-set><d:href>/dav/addressbooks/u/</d:href></a:addressbook-home-set>",
                             )
                         } else if path == "/dav/calendars/u/" || path == "/dav/addressbooks/u/" {
-                            let (href, kind) = if path.contains("calendars") { (CAL, "c:calendar") } else { (BOOK, "a:addressbook") };
+                            let (href, kind) = if s.contacts_only {
+                                (CAL, "a:addressbook")
+                            } else if path.contains("calendars") {
+                                (CAL, "c:calendar")
+                            } else {
+                                (BOOK, "a:addressbook")
+                            };
                             let mut rows = prop(
                                 href,
                                 &format!(
@@ -213,6 +222,46 @@ fn adopt(m: &mut Mailbox, mut d: Download) {
     }
     m.dav_resources = d.resources;
     m.dav_collections = d.collections;
+}
+#[test]
+fn separate_servers_with_identical_paths_sync_to_the_correct_origin_and_fail_atomically() {
+    let calendar = Fake::new();
+    let contacts = Fake::new();
+    let path = format!("{CAL}same");
+    {
+        let mut s = calendar.state.lock().unwrap();
+        s.items.clear();
+        s.items.insert(path.clone(), (1, ICS.into()));
+        let mut s = contacts.state.lock().unwrap();
+        s.contacts_only = true;
+        s.items.clear();
+        s.items.insert(path.clone(), (1, VCF.into()));
+    }
+    let mut m = calendar.mailbox();
+    m.accounts[0].carddav_url = contacts.url.clone();
+    check_account(&m.accounts[0], "secret").unwrap();
+    let d = calendar.sync(&m, true);
+    assert!(d.complete && d.errors.is_empty(), "{:?}", d.errors);
+    assert_eq!(d.resources.len(), 2);
+    assert_ne!(d.resources[0].href, d.resources[1].href);
+    assert!(d.resources.iter().all(|r| r.href.starts_with("http://127.0.0.1:") && r.href.ends_with(&path)));
+    adopt(&mut m, d);
+    let contact = *m.contacts.keys().next().unwrap();
+    let event = *m.events.keys().next().unwrap();
+    m.contact_mut(contact).unwrap().display_name = "Updated person".into();
+    m.event_mut(event).unwrap().title = "Updated event".into();
+    let d = calendar.sync(&m, false);
+    assert!(d.complete && d.errors.is_empty(), "{:?}", d.errors);
+    assert_eq!(d.uploaded, 2);
+    adopt(&mut m, d);
+    assert!(calendar.state.lock().unwrap().items[&path].1.contains("Updated event"));
+    assert!(contacts.state.lock().unwrap().items[&path].1.contains("Updated person"));
+    m.event_mut(event).unwrap().title = "Pending event".into();
+    contacts.state.lock().unwrap().broken = true;
+    let d = calendar.sync(&m, false);
+    assert!(!d.complete && !d.errors.is_empty());
+    assert_eq!(calendar.state.lock().unwrap().writes.len(), 1);
+    assert_eq!(contacts.state.lock().unwrap().writes.len(), 1);
 }
 #[test]
 fn setup_checks_calendar_and_contacts_without_writing() {
