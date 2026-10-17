@@ -32,7 +32,7 @@ pub fn specs() -> Vec<CommandSpec> {
 }
 
 const ONE: &str = r#"{"id"?: number} (default: the selected contact)"#;
-const CONTACT: &str = r#"{"first"?: string, "last"?: string, "displayName"?: string, "company"?: string, "title"?: string, "department"?: string, "nickname"?: string, "email"?: string (primary) | "emails"?: [{"label", "value"}], "phone"?: string | "phones"?: [{"label", "value"}], "address"?: {"label", "street", "city", "region", "postalCode", "country"}, "website"?: string, "birthday"?: "YYYY-MM-DD" | null, "notes"?: string, "categories"?: [string], "favorite"?: bool}"#;
+const CONTACT: &str = r#"{"account"?: number, "addressBook"?: string (a DAV collection href; defaults to the personal Contacts book when present), "first"?: string, "last"?: string, "displayName"?: string, "company"?: string, "title"?: string, "department"?: string, "nickname"?: string, "email"?: string (primary) | "emails"?: [{"label", "value"}], "phone"?: string | "phones"?: [{"label", "value"}], "address"?: {"label", "street", "city", "region", "postalCode", "country"}, "website"?: string, "birthday"?: "YYYY-MM-DD" | null, "notes"?: string, "categories"?: [string], "favorite"?: bool}"#;
 
 fn needs_contact(s: &Session) -> Option<&'static str> {
     if s.sel.contact.is_none() { Some("select a contact first") } else { None }
@@ -158,19 +158,28 @@ fn new(s: &mut Session, v: &Value) -> CmdResult {
     if c.name().is_empty() {
         return Err(bad("a contact needs a name, a company or an e-mail address"));
     }
-    // With one connected writable address book, new contacts belong there. Imports and
-    // pre-existing local contacts remain local; an explicit account can choose another book.
+    // Prefer the personal Contacts book over auxiliary books such as Recipient Cache.
+    // Imports and pre-existing local contacts remain local; an explicit book can be chosen.
     let books: Vec<_> = s
         .mailbox
         .dav_collections
         .iter()
         .filter(|b| b.contacts && !b.read_only && s.mailbox.account(b.account).is_some_and(|a| !a.dav_url.is_empty()))
         .filter(|b| p::id(v, "account").is_none_or(|id| id == b.account))
+        .filter(|b| p::str(v, "addressBook").is_none_or(|href| href == b.href))
         .collect();
-    if let [book] = books.as_slice() {
+    let preferred: Vec<_> = books.iter().copied().filter(|b| b.name.eq_ignore_ascii_case("Contacts")).collect();
+    let chosen = match books.as_slice() {
+        [book] => Some(*book),
+        _ => match preferred.as_slice() {
+            [book] => Some(*book),
+            _ => None,
+        },
+    };
+    if let Some(book) = chosen {
         c.origin = mailcraft_model::Origin { account: book.account, id: book.href.clone(), ..Default::default() };
         c.uid = super::remote::new_token(s.mailbox.contacts.len() as u64, s.now().unsigned_abs());
-    } else if p::id(v, "account").is_some() {
+    } else if p::id(v, "account").is_some() || p::str(v, "addressBook").is_some() {
         return Err(bad("Choose one writable DAV address book"));
     }
     let id = s.mailbox.add_contact(c);

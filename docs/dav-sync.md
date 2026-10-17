@@ -10,7 +10,7 @@ Account Settings has an optional **Calendar and contacts (DAV URL)** field. For 
 
 ## Two-way behavior
 
-- Contacts and personal appointments can be created, edited and deleted. New appointments use the selected server calendar, and new contacts use the one unambiguous writable DAV address book. Existing local data and imported files are not automatically uploaded.
+- Contacts and personal appointments can be created, edited and deleted. New appointments use the selected server calendar, and new contacts use the writable personal Contacts book (or the single writable address book). `people.new` can explicitly select `account` and `addressBook`. Existing local data and imported files are not automatically uploaded.
 - The desktop checks periodically and shortly after local edits. Downloads are cached in the regular mailbox file and survive restart.
 - Exact strong ETags protect PUT and DELETE. Creation uses a stable UID and `If-None-Match: *`. A conflicting server edit does not cause an unconditional retry or overwrite.
 - Only a complete unfiltered collection inventory establishes a remote deletion. Invalid XML, missing properties, denied access and interrupted downloads retain local data/checkpoints.

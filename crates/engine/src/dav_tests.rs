@@ -249,3 +249,18 @@ fn removed_recurrence_components_do_not_become_new_uploads() {
     assert!(s.mailbox.event(removed).is_none());
     assert!(!waiting(&s.mailbox, account));
 }
+
+#[test]
+fn new_contacts_prefer_contacts_over_grommunio_recipient_cache() {
+    let mut s = seeded();
+    let account = s.mailbox.accounts[0].id;
+    s.mailbox.dav_collections[0].name = "Contacts".into();
+    let cache = "/dav/addressbooks/u/Recipient%20Cache/";
+    s.mailbox.dav_collections.push(Collection { account, href: cache.into(), name: "Recipient Cache".into(), contacts: true, ..Default::default() });
+    let added = s.run("people.new", &json!({"first":"Personal"})).unwrap();
+    let id = added["id"].as_u64().unwrap();
+    assert_eq!(s.mailbox.contact(id).unwrap().origin.id, BOOK);
+    let added = s.run("people.new", &json!({"first":"Explicit cache","account":account,"addressBook":cache})).unwrap();
+    let id = added["id"].as_u64().unwrap();
+    assert_eq!(s.mailbox.contact(id).unwrap().origin.id, cache);
+}
