@@ -635,19 +635,91 @@ fn the_system_remembers_passwords_and_sign_ins_only_when_wanted() {
     // or an agent can't redirect what was given for the old ones. Other edits keep it.
     let moved = b.execute("account.add", json!({"email": "sky@mail.example", "incoming": {"host": "imap.mail.example"}})).unwrap()["id"].as_u64();
     let moved = moved.unwrap();
-    for change in [json!({"davUrl": "https://dav.elsewhere.example/dav/"}), json!({"incoming": {"host": "imap.elsewhere.example"}})] {
-        b.execute("ui.sync", json!({"account": moved, "password": "pw-three"})).unwrap();
-        b.poll_sync();
-        b.execute("account.edit", json!({"id": moved, "displayName": "Sky"})).unwrap();
+    let changes = [
+        json!({"incoming": {"host": "imap.elsewhere.example"}}),
+        json!({"outgoing": {"host": "smtp.elsewhere.example"}}),
+        json!({"davUrl": "https://dav.elsewhere.example/dav/"}),
+        json!({"davUrl": "https://dav.elsewhere.example/dav/", "carddavUrl": "https://contacts.elsewhere.example/dav/"}),
+    ];
+    for change in &changes {
+        let mut c = start(b.session.mailbox.clone());
+        c.execute("ui.sync", json!({"account": moved, "password": "pw-three"})).unwrap();
+        c.poll_sync();
+        c.execute("account.edit", json!({"id": moved, "displayName": "Sky"})).unwrap();
         assert_eq!(kept("password:sky@mail.example").as_deref(), Some("pw-three"));
         let mut edit = change.clone();
         edit["id"] = json!(moved);
-        b.execute("account.edit", edit).unwrap();
+        c.execute("account.edit", edit).unwrap();
         assert_eq!(kept("password:sky@mail.example"), None, "{change}");
-        assert_eq!(b.execute("ui.sync", json!({"account": moved})).unwrap()["pending"], "password", "{change}");
-        assert!(b.execute("ui.davSync", json!({"account": moved})).is_err());
-        b.dialog = None;
+        assert_eq!(c.execute("ui.sync", json!({"account": moved})).unwrap()["pending"], "password", "{change}");
+        assert!(c.execute("ui.davSync", json!({"account": moved})).is_err());
+        c.dialog = None;
     }
+
+    // The same server edits discard both the in-memory access token and the remembered
+    // refresh token. A display-name edit keeps them; a later start cannot revive them.
+    for change in &changes {
+        let mut c = start(b.session.mailbox.clone());
+        c.execute("ui.sync", json!({"account": signed})).unwrap();
+        c.poll_sign_in();
+        c.poll_sync();
+        assert!(c.tokens.contains_key(&signed));
+        assert_eq!(kept("refresh:quinn@mail.example").as_deref(), Some("ref-kept"));
+        c.execute("account.edit", json!({"id": signed, "displayName": "Quinn"})).unwrap();
+        assert!(c.tokens.contains_key(&signed));
+        assert_eq!(kept("refresh:quinn@mail.example").as_deref(), Some("ref-kept"));
+
+        let mut edit = change.clone();
+        edit["id"] = json!(signed);
+        let password_dav = change.get("davUrl").is_some();
+        if password_dav {
+            // DAV supports password accounts only: switching from OAuth must drop its tokens.
+            edit["auth"] = json!("password");
+        }
+        c.execute("account.edit", edit).unwrap();
+        assert!(!c.tokens.contains_key(&signed), "{change}");
+        assert_eq!(kept("refresh:quinn@mail.example"), None, "{change}");
+        let runs = synced.lock().unwrap().len();
+        let renewals_before = renewals.lock().unwrap().len();
+        let answer = c.execute("ui.sync", json!({"account": signed})).unwrap();
+        if password_dav {
+            assert_eq!(answer["pending"], "password", "{change}");
+            assert_eq!(renewals.lock().unwrap().len(), renewals_before);
+        } else {
+            assert_eq!(renewals.lock().unwrap().last().unwrap(), "", "{change}");
+        }
+        assert_eq!(synced.lock().unwrap().len(), runs, "the old access token must not reach sync: {change}");
+
+        let mut restarted = start(c.session.mailbox.clone());
+        let answer = restarted.execute("ui.sync", json!({"account": signed})).unwrap();
+        if password_dav {
+            assert_eq!(answer["pending"], "password", "{change}");
+            assert_eq!(renewals.lock().unwrap().len(), renewals_before);
+        } else {
+            assert_eq!(renewals.lock().unwrap().last().unwrap(), "", "a restart must not restore the old refresh token: {change}");
+        }
+        assert_eq!(synced.lock().unwrap().len(), runs, "{change}");
+    }
+
+    // Replacing an existing separate CardDAV endpoint is refused until DAV is disconnected.
+    // A rejected edit must preserve the account and both kinds of remembered credential.
+    let mut c = start(b.session.mailbox.clone());
+    c.execute("account.edit", json!({"id": moved, "davUrl": "https://dav.mail.example/dav/", "carddavUrl": "https://contacts.mail.example/dav/"}))
+        .unwrap();
+    c.execute("ui.sync", json!({"account": moved, "password": "pw-three"})).unwrap();
+    c.poll_sync();
+    c.execute("ui.sync", json!({"account": signed})).unwrap();
+    c.poll_sign_in();
+    c.poll_sync();
+    for account in [moved, signed] {
+        assert!(c.execute("account.edit", json!({"id": account, "carddavUrl": "https://contacts.elsewhere.example/dav/"})).is_err());
+        let expected = if account == moved { "https://contacts.mail.example/dav/" } else { "" };
+        assert_eq!(c.session.mailbox.account(account).unwrap().carddav_url, expected);
+    }
+    assert_eq!(kept("password:sky@mail.example").as_deref(), Some("pw-three"));
+    assert!(c.passwords.contains_key(&moved));
+    assert_eq!(kept("refresh:quinn@mail.example").as_deref(), Some("ref-kept"));
+    assert!(c.tokens.contains_key(&signed));
 }
 
 /// (#103) An account that exists is signed in again, and on the provider's page the owner picks
