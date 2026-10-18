@@ -6,15 +6,20 @@
 //! JSON control channel and the MCP server all call [`Session::run`].
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod agent;
 pub mod catalog;
 pub mod cmd;
 pub mod dav;
 pub mod io;
 pub mod list;
+pub mod opening;
 pub mod sample;
 mod session;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod store;
+mod undo;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod words;
 
 use std::collections::HashMap;
 
@@ -25,9 +30,15 @@ pub use mailcraft_mime as mime;
 pub use mailcraft_model as model;
 pub use mailcraft_time as time;
 pub use session::{
-    BodyFormat, CalView, Clock, Compose, ComposeMode, Doc, Filter, InsertedSignature, Module, Pane, Prefs, Quote, Scope, Selection, Session,
-    SignatureEdit, SortBy, TaskFilter, ViewState,
+    BodyFormat, CalView, Clock, Compose, ComposeMode, Doc, Filter, InsertedSignature, Module, Pane, Part, Prefs, Quote, Scope, Selection, Session,
+    SignatureEdit, SortBy, TaskFilter, ViewState, WordIndex,
 };
+
+/// What a message says instead of text that couldn't be read back from where the mailbox keeps
+/// it (`store::UNAVAILABLE`; the same words in every build).
+pub fn store_placeholder() -> &'static str {
+    "[This message's text is unavailable: the file that keeps it is missing from the mailbox's content folder, or damaged.]"
+}
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq)]
 pub enum CmdError {
@@ -129,13 +140,29 @@ impl Registry {
         Value::Array(
             self.specs
                 .iter()
-                .map(|s| serde_json::json!({"id": s.id, "label": s.label, "location": s.location, "shortcut": s.shortcut, "params": s.params, "mutates": s.mutates}))
+                .map(|s| {
+                    let mut v = serde_json::json!({"id": s.id, "label": s.label, "location": s.location, "shortcut": s.shortcut, "params": s.params, "mutates": s.mutates});
+                    agent_fields(&mut v, s.id);
+                    v
+                })
                 .collect(),
         )
     }
     /// The command bound to a shortcut, if any.
     pub fn by_shortcut(&self, key: &str) -> Option<&CommandSpec> {
         self.specs.iter().find(|s| !s.shortcut.is_empty() && s.shortcut.split(" / ").any(|k| k.eq_ignore_ascii_case(key)))
+    }
+}
+
+/// Add `agent` (`"safe"`, `"owner"`, `"never"`) and, for `"owner"`, `needs` (the `--allow`
+/// class) to a command's description.
+pub fn agent_fields(v: &mut Value, id: &str) {
+    let a = agent::access(id).unwrap_or(agent::Access::Never);
+    if let Some(o) = v.as_object_mut() {
+        o.insert("agent".into(), Value::from(a.label()));
+        if let agent::Access::Owner(c) = a {
+            o.insert("needs".into(), Value::from(c.as_str()));
+        }
     }
 }
 

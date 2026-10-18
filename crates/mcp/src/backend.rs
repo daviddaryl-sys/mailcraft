@@ -31,6 +31,10 @@ pub struct Remote {
     /// The control key, looked up once per connection (the app picks a new one at every start).
     key: Option<String>,
     find_key: KeyFinder,
+    /// What the owner allowed the agent in advance (`--allow`). Every request carries it in its
+    /// `agent` field, set here and never from a tool's arguments: the app knows the request is
+    /// an agent's, and asks the owner about the rest.
+    allow: Vec<mailcraft_engine::agent::Class>,
 }
 
 /// The control key: `env` (`MAILCRAFT_CONTROL_KEY`) when set, else the app's key file for
@@ -83,12 +87,18 @@ impl Remote {
     }
 
     fn connect_with(addr: &str, find_key: KeyFinder) -> std::io::Result<Self> {
-        let mut r = Self { addr: addr.to_string(), conn: None, next_id: 1, send_key: false, key: None, find_key };
+        let mut r = Self { addr: addr.to_string(), conn: None, next_id: 1, send_key: false, key: None, find_key, allow: Vec::new() };
         r.reconnect()?;
         if let Some(w) = r.key_warning() {
             log::warn!("{w}");
         }
         Ok(r)
+    }
+
+    /// What the owner allows the agent without being asked (`--allow`).
+    pub fn with_allow(mut self, allow: Vec<mailcraft_engine::agent::Class>) -> Self {
+        self.allow = allow;
+        self
     }
 
     pub fn addr(&self) -> &str {
@@ -129,7 +139,9 @@ impl Remote {
     /// The request line; it carries the key when this connection may (looked up once per
     /// connection).
     fn request_line(&mut self, id: u64, method: &str, params: &Value) -> Result<String, String> {
-        let mut req = json!({"id": id, "method": method, "params": params});
+        // Marked as an agent's (`docs/control-protocol.md`, Agents).
+        let allow: Vec<&str> = self.allow.iter().map(|c| c.as_str()).collect();
+        let mut req = json!({"id": id, "method": method, "params": params, "agent": {"allow": allow}});
         if self.send_key {
             let key = match &self.key {
                 Some(k) => k.clone(),
@@ -330,6 +342,17 @@ mod tests {
             assert_eq!(r.call("mailbox.inspect", json!({})).unwrap(), json!(7));
             assert_eq!(seen.recv_timeout(WAIT).unwrap()["key"], "k1", "{host}");
         }
+    }
+
+    #[test]
+    fn every_request_is_marked_as_an_agents() {
+        let (port, seen) = fake_app(|_| Some((json!({"ok": true, "result": 1}), false)));
+        let mut r =
+            Remote::connect_with(&format!("127.0.0.1:{port}"), fixed_key("k1")).unwrap().with_allow(vec![mailcraft_engine::agent::Class::Input]);
+        // Whatever the params say.
+        r.call("engine.execute", json!({"command": "mail.flag", "agent": null, "params": {"agent": false}})).unwrap();
+        let req = seen.recv_timeout(WAIT).unwrap();
+        assert_eq!(req["agent"], json!({"allow": ["input"]}));
     }
 
     #[test]

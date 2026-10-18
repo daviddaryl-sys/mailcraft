@@ -1,5 +1,5 @@
 # The gates every change must pass: formatting, clippy with warnings as errors, the tests, asset
-# attribution, crate layering and the wasm build (`cargo xtask ci`), on the three desktop systems
+# attribution, crate layering, the wasm build and cargo-deny (`cargo xtask ci`), on the three desktop systems
 # (clippy and wasm on Linux only). Changes to documentation alone don't run it; `ci-ok` reports
 # on every pull request either way, and is the check that protection of main requires.
 name: CI
@@ -26,8 +26,9 @@ jobs:
     outputs:
       code: ${{ steps.diff.outputs.code }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
       - id: diff
         env:
@@ -51,12 +52,15 @@ jobs:
         os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Windowing and file-dialog headers the desktop app links against.
       - name: Linux build dependencies
         if: runner.os == 'Linux'
@@ -65,12 +69,27 @@ jobs:
       # tests still build every platform's code.
       - run: cargo xtask ci
         env:
-          XTASK_CI_SKIP: ${{ runner.os != 'Linux' && 'clippy,wasm' || '' }}
+          XTASK_CI_SKIP: ${{ runner.os != 'Linux' && 'clippy,wasm,deny' || 'deny' }}
+
+  # cargo-deny (deny.toml): RustSec advisories, licences, duplicate crates, sources. Its own job,
+  # since it needs no build; `ci` skips the step it would otherwise run.
+  deny:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo xtask deny
 
   # The one check main's protection requires: passes when every platform passed, or when there
   # was nothing but documentation to check.
   ci-ok:
-    needs: [changes, ci]
+    needs: [changes, ci, deny]
     if: always()
     runs-on: ubuntu-24.04
     steps:

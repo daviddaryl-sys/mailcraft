@@ -209,12 +209,17 @@ pub struct Block {
     /// block of its container.
     #[serde(default)]
     pub space: u8,
+    /// The block goes on in the line of the block before: a picture in a line of text, or the
+    /// text that follows a picture in its line (`<img> 12`). Never set on the first block of its
+    /// container, nor where a line break or a block of its own came in between.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub beside: bool,
 }
 
 impl Block {
     /// A block of `kind` with no quoting, alignment or gap.
     pub fn new(kind: BlockKind, spans: Vec<Span>) -> Block {
-        Block { kind, spans, quote: 0, align: Align::Left, space: 0 }
+        Block { kind, spans, quote: 0, align: Align::Left, space: 0, beside: false }
     }
 
     /// The block's text without formatting (not what is inside a table: see [`has_text`]).

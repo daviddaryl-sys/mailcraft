@@ -2,7 +2,7 @@
 //! calendars and contacts travel in (`.eml`, `.mbox`, `.ics`, `.vcf`). How a mailbox is kept on
 //! disk while it is worked on is `crate::store`.
 
-use mailcraft_model::{FolderKind, Id, Mailbox};
+use mailcraft_model::{AccountKind, FolderKind, Id, Mailbox};
 use serde_json::{Value, json};
 
 use crate::cmd::{bad, fail};
@@ -14,9 +14,25 @@ pub const MAX_FILE: u64 = 512 << 20;
 /// The mailbox file's extension.
 pub const MAILBOX_EXT: &str = "mailcraft";
 
+/// How a mailbox file in format 3 begins: the form a desktop program keeps it in, a log of
+/// records beside a folder of content (`crate::store`). One self-contained file is JSON.
+pub const INDEX_MAGIC: &[u8; 16] = b"MailCraft index\n";
+
+/// How every mailbox file that isn't JSON begins, whatever its form: format 3's
+/// [`INDEX_MAGIC`], and whatever a newer MailCraft writes. A file that begins so but isn't a form
+/// this program reads was written by a newer one, and is said to be.
+pub const FAMILY: &[u8] = b"MailCraft ";
+
+/// What the owner is told about a mailbox file of a form a newer MailCraft writes.
+pub const NEWER: &str = "this mailbox was written by a newer MailCraft";
+
+/// The message for a mailbox file that keeps its content in a folder beside it, read without it.
+const KEPT_BESIDE: &str = "this mailbox file keeps its messages' content in a folder beside it; open it where it is kept, or save it as one file first (File › Open & Export › Save Mailbox As)";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
-    /// A MailCraft mailbox (`.mailcraft`, JSON; kept on disk with a content folder beside it).
+    /// A MailCraft mailbox (`.mailcraft`: one JSON file, or a log of records with a content folder
+    /// beside it, `crate::store`).
     Mailbox,
     /// One Internet message.
     Eml,
@@ -40,8 +56,12 @@ impl Format {
         }
     }
 
-    /// The format by name, else by what the bytes start with.
+    /// The format by name, else by what the bytes start with. A mailbox file in format 3 is a
+    /// mailbox whatever it is called (none of the other formats starts like one).
     pub fn detect(name: &str, bytes: &[u8]) -> Option<Format> {
+        if bytes.starts_with(INDEX_MAGIC) {
+            return Some(Format::Mailbox);
+        }
         if let Some(f) = Format::from_extension(name) {
             return Some(f);
         }
@@ -76,15 +96,16 @@ impl Format {
 /// (`crate::store`); the file alone isn't the mailbox, and is opened by path instead
 /// ([`open_path`]).
 pub fn read_mailbox(bytes: &[u8]) -> Result<Mailbox, String> {
+    if bytes.starts_with(INDEX_MAGIC) {
+        return Err(KEPT_BESIDE.into());
+    }
+    if bytes.starts_with(FAMILY) {
+        return Err(NEWER.into());
+    }
     let mut mb: Mailbox = serde_json::from_slice(bytes).map_err(|e| format!("this isn't a MailCraft mailbox ({e})"))?;
     match mb.version {
         0 | 1 => {}
-        2 => {
-            return Err(
-                "this mailbox file keeps its messages' content in a folder beside it; open it where it is kept, or save it as one file first (File › Open & Export › Save Mailbox As)"
-                    .into(),
-            );
-        }
+        2 => return Err(KEPT_BESIDE.into()),
         newer => return Err(format!("this mailbox was written by a newer MailCraft (format {newer})")),
     }
     for line in mb.repair() {
@@ -99,10 +120,14 @@ pub fn write_mailbox(mb: &Mailbox) -> Result<Vec<u8>, String> {
 }
 
 /// Open a mailbox file by path: one self-contained file, or a file with its content folder
-/// beside it (`crate::store`).
+/// beside it (`crate::store`), with every body and attachment in memory: what comes back is the
+/// whole mailbox, to use without its file. A program that works on the mailbox opens it with
+/// `store::open` instead and reads what stays on disk when it wants it (`Session::content`).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_path(path: &std::path::Path) -> Result<Mailbox, String> {
-    crate::store::open(path).map(|opened| opened.mailbox)
+    let mut mailbox = crate::store::open(path)?.mailbox;
+    crate::store::load_all(path, &mut mailbox)?;
+    Ok(mailbox)
 }
 
 /// A host's way of keeping a mailbox file up to date without whoever changed the mailbox waiting
@@ -113,13 +138,63 @@ pub trait BackgroundSave {
     /// changes first, so they can't fall between two saves.
     fn follow(&self, path: &std::path::Path);
     /// Write this state of the mailbox (the session's `rev`) to `path` soon, without waiting. A
-    /// state still waiting its turn gives way to this newer one.
-    fn submit(&self, path: &std::path::Path, mailbox: Mailbox, rev: u64);
+    /// state still waiting its turn gives way to this newer one. The mailbox is copied (a cheap
+    /// copy: its items are shared) only when it is to be written: the same state handed in again
+    /// while it is on its way costs nothing.
+    fn submit(&self, path: &std::path::Path, mailbox: &Mailbox, rev: u64);
     /// What became of the states handed in, since this was last asked.
     fn reports(&self) -> Vec<SaveReport>;
-    /// Wait until nothing handed in is waiting or being written (the program is closing).
+    /// How far the writing has got, for the window to show: `None` when nothing handed in is
+    /// waiting or being written, and the file isn't busy otherwise ([`SaveStage::Sweeping`]).
+    fn progress(&self) -> Option<SaveProgress> {
+        None
+    }
+    /// Wait until nothing handed in is waiting or being written (the program is closing), for a
+    /// while at most: never forever. A save cut short leaves the file as the last one left it.
     fn flush(&self);
 }
+
+/// How far the saving of a mailbox has got ([`BackgroundSave::progress`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SaveProgress {
+    pub stage: SaveStage,
+    /// How many of the stage's `total` are done.
+    pub done: u64,
+    pub total: u64,
+    /// How long the state being written has been at it, in milliseconds (0 while it waits): a
+    /// save of a moment is not worth telling.
+    pub millis: u64,
+}
+
+/// What a save is at ([`SaveProgress`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SaveStage {
+    /// Handed in, waiting its turn.
+    #[default]
+    Waiting,
+    /// Going through the messages: what each comes to in the mailbox file.
+    Messages,
+    /// Writing the bodies and attachments that aren't on disk yet, one file each.
+    Content,
+    /// Nothing of the mailbox is being written, but its file is busy: the content files it no
+    /// longer names are being looked for and removed (or are about to be). Whatever replaces the
+    /// mailbox waits for this too, so as not to find the file taken.
+    Sweeping,
+}
+
+/// Where a host gets the content of a mailbox that isn't in memory: the attachments, and the
+/// bodies of mail older than the memory the mailbox was given when it was opened, which the
+/// desktop's `store` keeps in the content folder beside the mailbox file ([`ContentRef`]). The
+/// engine asks for a part when something needs its bytes ([`Session::content`]); nothing is
+/// fetched for a message nobody looks at. The browser keeps every mailbox in memory and has no
+/// source.
+pub trait ContentSource: Send + Sync {
+    /// The bytes kept under `r` for the mailbox file at `mailbox`, checked against the length and
+    /// SHA-256 the reference names (anything else is "missing or damaged", never bytes).
+    fn fetch(&self, mailbox: &std::path::Path, r: &ContentRef) -> Result<std::sync::Arc<Vec<u8>>, String>;
+}
+
+pub use mailcraft_model::ContentRef;
 
 /// How writing one state of a mailbox went ([`BackgroundSave::reports`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,6 +222,19 @@ pub fn import(s: &mut Session, name: &str, bytes: &[u8], folder: Option<Id>) -> 
             if messages.is_empty() {
                 return Err(fail(format!("{name} has no messages")));
             }
+            // Graph can't put received mail into a Microsoft account's folders: a local folder
+            // has it instead, and is shown (R3 spec S30).
+            let microsoft = s.mailbox.folder(folder).and_then(|f| s.mailbox.account(f.account)).is_some_and(|a| a.kind == AccountKind::Microsoft);
+            let folder = if microsoft {
+                let drafts = s.mailbox.folder(folder).is_some_and(|f| f.kind == FolderKind::Drafts);
+                let local = s.mailbox.imported_folder(drafts)?;
+                s.view.folder = local;
+                s.view.module = crate::Module::Mail;
+                s.view.search.clear();
+                local
+            } else {
+                folder
+            };
             let drafts = s.mailbox.folder(folder).is_some_and(|f| f.kind == FolderKind::Drafts);
             let mut ids = Vec::new();
             for mut m in messages {
@@ -162,7 +250,9 @@ pub fn import(s: &mut Session, name: &str, bytes: &[u8], folder: Option<Id>) -> 
             if let Some(last) = ids.last() {
                 s.sel.messages = vec![*last];
             }
-            Ok(json!({"format": if format == Format::Eml { "eml" } else { "mbox" }, "messages": ids.len(), "ids": ids, "folder": folder}))
+            Ok(
+                json!({"format": if format == Format::Eml { "eml" } else { "mbox" }, "messages": ids.len(), "ids": ids, "folder": folder, "local": microsoft}),
+            )
         }
         Format::Ics => {
             let text = String::from_utf8_lossy(bytes);
@@ -204,7 +294,7 @@ pub fn import(s: &mut Session, name: &str, bytes: &[u8], folder: Option<Id>) -> 
             Ok(json!({"format": "ics", "events": events.len(), "tasks": tasks.len(), "updated": updated, "method": file.method, "notes": notes}))
         }
         Format::Vcf => {
-            let contacts = mailcraft_vcard::parse(&String::from_utf8_lossy(bytes));
+            let contacts = mailcraft_vcard::parse_bytes(bytes);
             if contacts.is_empty() {
                 return Err(fail(format!("{name} has no contacts")));
             }

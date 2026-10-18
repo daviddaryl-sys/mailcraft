@@ -177,6 +177,12 @@ pub(crate) struct ImapWorld {
     pub(crate) answers: Vec<(String, String)>,
     /// What to say in place of the truth about where copied messages went (the text of the `COPYUID` code).
     pub(crate) copyuid: Option<String>,
+    /// Behave as Gmail does, and say so (`X-GM-EXT-1`): a mailbox is a label, and the `\All`
+    /// mailbox has every message that is not in `\Trash`. A message is known by its bytes. A move
+    /// to `\All` only takes the label away, and puts no second copy there; a move out of `\All`
+    /// adds a label and leaves the message in it; a move to `\Trash` takes the message out of
+    /// every other mailbox; and a message expunged from a label is still in `\All`.
+    pub(crate) gmail: bool,
     /// The mailboxes subscribed to.
     pub(crate) subscribed: Vec<String>,
     /// Every line received.
@@ -193,7 +199,8 @@ impl ImapWorld {
         let starttls = if self.offer_starttls { " STARTTLS" } else { "" };
         let can_move = if self.can_move { " MOVE" } else { "" };
         let uidplus = if self.uidplus { " UIDPLUS" } else { "" };
-        format!("IMAP4rev1 SPECIAL-USE{xoauth2}{plain}{sasl_ir}{starttls}{can_move}{uidplus}")
+        let gmail = if self.gmail { " X-GM-EXT-1" } else { "" };
+        format!("IMAP4rev1 SPECIAL-USE{xoauth2}{plain}{sasl_ir}{starttls}{can_move}{uidplus}{gmail}")
     }
 
     pub(crate) fn mailbox(&mut self, raw: &str) -> &mut FakeMailbox {
@@ -585,9 +592,25 @@ fn serve_imap(stream: TcpStream, shared: Arc<Mutex<ImapWorld>>) {
                             None => reply.extend(format!("{tag} NO [TRYCREATE] no such mailbox\r\n").bytes()),
                             Some(to) => {
                                 let taken: Vec<FakeMessage> = world.mailboxes[at].messages.iter().filter(|m| in_set(set, m.uid)).cloned().collect();
+                                let role = |m: &FakeMailbox, flag: &str| world.gmail && m.flags.split_whitespace().any(|f| f == flag);
+                                let (to_all, to_trash, from_all) =
+                                    (role(&world.mailboxes[to], "\\All"), role(&world.mailboxes[to], "\\Trash"), role(&world.mailboxes[at], "\\All"));
                                 let (mut from_uids, mut to_uids) = (Vec::new(), Vec::new());
                                 for mut message in taken {
                                     from_uids.push(message.uid.to_string());
+                                    // Gmail: all mail has it already.
+                                    if let Some(there) = world.mailboxes[to].messages.iter().find(|m| to_all && m.body == message.body) {
+                                        to_uids.push(there.uid.to_string());
+                                        continue;
+                                    }
+                                    // Gmail: in the trash, and nowhere else.
+                                    if to_trash && what == "MOVE" {
+                                        for (i, other) in world.mailboxes.iter_mut().enumerate() {
+                                            if i != to && i != at {
+                                                other.remove(|m| m.body == message.body);
+                                            }
+                                        }
+                                    }
                                     message.uid = world.mailboxes[to].take_uid();
                                     to_uids.push(message.uid.to_string());
                                     world.mailboxes[to].messages.push(message);
@@ -603,8 +626,11 @@ fn serve_imap(stream: TcpStream, shared: Arc<Mutex<ImapWorld>>) {
                                     if !code.is_empty() {
                                         reply.extend(format!("* OK {code}moved\r\n").bytes());
                                     }
-                                    world.mailboxes[at].remove(|m| in_set(set, m.uid));
-                                    reply.extend("* 1 EXPUNGE\r\n".repeat(from_uids.len()).bytes());
+                                    // Gmail: a label is added, and the message stays in all mail.
+                                    if !from_all || to_trash {
+                                        world.mailboxes[at].remove(|m| in_set(set, m.uid));
+                                        reply.extend("* 1 EXPUNGE\r\n".repeat(from_uids.len()).bytes());
+                                    }
                                     reply.extend(format!("{tag} OK done\r\n").bytes());
                                 } else {
                                     reply.extend(format!("{tag} OK {code}copied\r\n").bytes());

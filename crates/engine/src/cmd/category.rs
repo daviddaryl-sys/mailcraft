@@ -20,8 +20,22 @@ fn set(s: &mut Session, v: &Value) -> CmdResult {
     if s.mailbox.categories.len() >= 200 && s.mailbox.category(p::req_str(v, "name")?).is_none() {
         return Err(super::fail("there are too many categories"));
     }
-    s.mailbox.set_category(p::req_str(v, "name")?, color)?;
+    // A category on Outlook's list has Outlook's colour (R3 spec S18): nothing changes here or
+    // on the server.
+    let name = p::req_str(v, "name")?;
+    if on_outlooks_list(s, name) && s.mailbox.category(name).is_some_and(|c| c.color != color) {
+        return Err(super::fail(COLOUR_IN_OUTLOOK));
+    }
+    s.mailbox.set_category(name, color)?;
     done()
+}
+
+/// What changing the colour of a category on Outlook's list says.
+pub const COLOUR_IN_OUTLOOK: &str = "The colour is set in Outlook";
+
+/// Whether `name` is on Outlook's list of categories, as a Microsoft account's server last gave it.
+pub fn on_outlooks_list(s: &Session, name: &str) -> bool {
+    s.mailbox.outlook_categories.iter().any(|c| mailcraft_model::sync::same_category(c, name.trim()))
 }
 
 fn rename(s: &mut Session, v: &Value) -> CmdResult {
@@ -35,5 +49,10 @@ fn remove(s: &mut Session, v: &Value) -> CmdResult {
 }
 
 fn list(s: &mut Session, _: &Value) -> CmdResult {
-    Ok(json!({"categories": s.mailbox.categories.iter().map(|c| json!({"name": c.name, "color": c.color.hex()})).collect::<Vec<_>>()}))
+    // `outlook`: on Outlook's list (its colour is Outlook's); `null` while no such list was read.
+    let read = !s.mailbox.outlook_categories.is_empty();
+    let listed = |name: &str| read.then(|| on_outlooks_list(s, name));
+    Ok(
+        json!({"categories": s.mailbox.categories.iter().map(|c| json!({"name": c.name, "color": c.color.hex(), "outlook": listed(&c.name)})).collect::<Vec<_>>()}),
+    )
 }

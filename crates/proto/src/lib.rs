@@ -79,6 +79,34 @@ impl Secrets {
     }
 }
 
+/// What the wire trace shows of a protocol line, either way: its leading keywords (a tag, a
+/// reply code, a command or status word, a sequence set, an extension's name) and how long the
+/// rest is. Whatever follows the first character that is no keyword's (lower case, `@`, a
+/// quote, a bracket of a list) is left out: a user name, an address in `MAIL FROM` or `RCPT TO`,
+/// a folder's name, a server's "ada@example.org authenticated" or "<bob@example.org> unknown",
+/// the flags and headers of a message. Secrets are hidden before this ([`Secrets::hide`]).
+pub(crate) fn for_trace(line: &str) -> String {
+    const MAX_KEPT: usize = 120;
+    let line = line.trim_end();
+    let keyword = |c: char| c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '*' | '+' | '-' | '.' | ':' | ',' | '=' | '_' | '[' | ']');
+    let end = line.char_indices().find(|(_, c)| !keyword(*c) && *c != ' ').map_or(line.len(), |(at, _)| at);
+    let mut kept = line.get(..end).unwrap_or_default();
+    let opens = line.get(end..).is_some_and(|rest| rest.starts_with(['<', '(', '"', '{', '\\']));
+    if end < line.len() && !kept.ends_with(' ') && !opens {
+        // A word cut short is left out, unless it is the first one (`250-` of `250-mx.example`).
+        if let Some(space) = kept.trim_end().rfind(' ') {
+            kept = kept.get(..space).unwrap_or_default();
+        }
+    }
+    let kept: String = kept.trim_end().chars().take(MAX_KEPT).collect();
+    let left = line.get(kept.len()..).unwrap_or_default().trim_start().len();
+    match (kept.is_empty(), left) {
+        (_, 0) => kept,
+        (true, _) => format!("({left} bytes)"),
+        (false, _) => format!("{kept} … ({left} bytes)"),
+    }
+}
+
 /// Server text made fit for an error message: one line, no control characters, not too long.
 pub(crate) fn tidy(text: &str) -> String {
     const MAX_CHARS: usize = 300;
@@ -105,6 +133,35 @@ pub(crate) fn tidy(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wire_trace_keeps_keywords_and_no_address_name_or_text() {
+        // (Line, what the trace shows.)
+        for (line, shown) in [
+            ("A0001 OK ada@example.org authenticated (Success)\r\n", "A0001 OK … (39 bytes)"),
+            ("A0002 LOGIN ***", "A0002 LOGIN ***"),
+            ("MAIL FROM:<ada@example.org> SIZE=120", "MAIL FROM: … (26 bytes)"),
+            ("RCPT TO:<bob@example.org>", "RCPT TO: … (17 bytes)"),
+            ("550 5.1.1 <bob@example.org>: Recipient address rejected", "550 5.1.1 … (45 bytes)"),
+            ("250-mx.example.org at your service", "250- … (30 bytes)"),
+            ("250-AUTH LOGIN PLAIN XOAUTH2", "250-AUTH LOGIN PLAIN XOAUTH2"),
+            ("A0003 SELECT \"Letters from Grace\"", "A0003 SELECT … (20 bytes)"),
+            ("* LIST (\\HasNoChildren) \"/\" Grace", "* LIST … (26 bytes)"),
+            ("* 12 FETCH (UID 40 FLAGS (\\Seen) BODY[HEADER.FIELDS (SUBJECT)] \"Subject: Quarterly figures\")", "* 12 FETCH … (81 bytes)"),
+            ("* 3 EXISTS", "* 3 EXISTS"),
+            ("UID FETCH 1:40,42 (UID FLAGS)", "UID FETCH 1:40,42 … (11 bytes)"),
+            ("hello there", "(11 bytes)"),
+            ("", ""),
+        ] {
+            let traced = for_trace(line);
+            assert_eq!(traced, shown, "{line:?}");
+            for private in ["ada", "bob", "Grace", "Quarterly", "mx.example"] {
+                assert!(!traced.contains(private), "{line:?}: {traced}");
+            }
+        }
+        assert!(for_trace(&format!("A0001 OK {}", "X ".repeat(500))).len() < 160);
+        assert_eq!(for_trace("ünïcödé ä"), "(14 bytes)");
+    }
 
     #[test]
     fn secrets_are_hidden_longest_first() {

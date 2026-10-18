@@ -292,6 +292,8 @@ impl MailApp {
             favorites,
             favorites_scopes: favorites,
             mail: None,
+            mail_pieces: None,
+            cancel: Default::default(),
         };
         let Some(graph) = &self.services.graph else { return false };
         if settings {
@@ -314,9 +316,18 @@ impl MailApp {
         let mut result = match rx.try_recv() {
             Ok(result) => result,
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => GraphResult { account, ..Default::default() },
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                log::warn!("calendar, account {account}: the job ended without an answer (its thread ended early)");
+                GraphResult { account, ..Default::default() }
+            }
         };
         self.calendar.rx = None;
+        if result.consent_needed {
+            log::info!("calendar, account {account}: waiting for the owner's permission (Connect calendar and contacts)");
+        }
+        if result.sign_in_refused {
+            log::warn!("calendar, account {account}: the sign-in was refused; the next Send/Receive asks the owner");
+        }
         let mut errors = std::mem::take(&mut result.errors);
         if result.token_refused {
             self.graph_tokens.remove(&account);
@@ -353,6 +364,10 @@ impl MailApp {
     /// A Graph token that a job obtained: kept for the session, and its refresh token is the
     /// account's newest, for mail and Graph alike.
     pub(crate) fn keep_graph_tokens(&mut self, account: Id, tokens: Tokens) {
+        // Somebody else's are neither used nor remembered (#103).
+        if self.signed_in_as_other(account, &tokens) {
+            return;
+        }
         self.note_directory(account, &tokens.tenant);
         let address = self.session.mailbox.account(account).map(|a| a.email.clone()).unwrap_or_default();
         if !tokens.refresh.is_empty() {
@@ -547,6 +562,7 @@ impl MailApp {
             Ok(result) => result,
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                log::warn!("calendar check, account {account}: the check ended without an answer (its thread ended early)");
                 CalendarCheckResult { account, error: tl!("the check stopped unexpectedly").to_string(), cleaned_up: true, ..Default::default() }
             }
         };

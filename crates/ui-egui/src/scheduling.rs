@@ -300,7 +300,9 @@ impl MailApp {
         if result.token_refused {
             self.graph_tokens.remove(&account);
         }
-        if let Some(tokens) = result.tokens {
+        if let Some(tokens) = result.tokens
+            && !self.signed_in_as_other(account, &tokens)
+        {
             // The newest refresh token is the account's, for mail and the calendar alike.
             let address = self.session.mailbox.account(account).map(|a| a.email.clone()).unwrap_or_default();
             if !tokens.refresh.is_empty() {

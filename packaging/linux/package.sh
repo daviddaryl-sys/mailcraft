@@ -9,10 +9,11 @@
 #
 # Usage: packaging/linux/package.sh [--skip-build] [--formats "appimage deb rpm tar"]
 #
-# Needs: cargo; nfpm for deb/rpm (https://nfpm.goreleaser.com); appimagetool for the AppImage
-# (downloaded into $CARGO_TARGET_DIR if missing). Build on an old distro (CI: Ubuntu 22.04,
-# glibc 2.35) so the binaries run on newer ones. Optional: desktop-file-validate, appstreamcli,
-# zsyncmake (the zsync package) for the AppImage's .zsync.
+# Needs: cargo; nfpm for deb/rpm (https://nfpm.goreleaser.com); appimagetool and its runtime for
+# the AppImage (pinned releases, downloaded into $CARGO_TARGET_DIR and checked against their
+# sha256 if APPIMAGETOOL / APPIMAGE_RUNTIME don't name them). Build on an old distro (CI:
+# Ubuntu 22.04, glibc 2.35) so the binaries run on newer ones. Optional: desktop-file-validate,
+# appstreamcli, zsyncmake (the zsync package) for the AppImage's .zsync.
 set -euo pipefail
 # shellcheck source=../env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
@@ -25,7 +26,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --skip-build) SKIP_BUILD=1; shift ;;
     --formats) FORMATS="$2"; shift 2 ;;
-    -h | --help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -107,19 +108,52 @@ if has appimage; then
   cp "$ROOT/assets/app-icon/hicolor/256x256/apps/$APP_ID.png" "$APPDIR/$APP_ID.png"
   ln -s "$APP_ID.png" "$APPDIR/.DirIcon"
 
+  # appimagetool and the AppImage runtime it embeds are pinned releases, checked against these
+  # sha256s before use (a cached copy too). Left to itself appimagetool would fetch the runtime
+  # from the moving `continuous` release, so the runtime is passed in with --runtime-file.
+  # appimagetool 1.9.1: https://github.com/AppImage/appimagetool/releases/tag/1.9.1
+  # type2-runtime 20251108: https://github.com/AppImage/type2-runtime/releases/tag/20251108
+  APPIMAGETOOL_VERSION=1.9.1
+  APPIMAGE_RUNTIME_VERSION=20251108
+  case "$ARCH" in
+    x86_64)
+      TOOL_SHA256=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+      RUNTIME_SHA256=2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d ;;
+    aarch64)
+      TOOL_SHA256=f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158
+      RUNTIME_SHA256=00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444 ;;
+    *) TOOL_SHA256=; RUNTIME_SHA256= ;;
+  esac
+  # fetch_pinned <url> <file> <sha256>: download unless a copy with that hash is already there.
+  fetch_pinned() {
+    if [ -z "$3" ]; then echo "error: no pinned checksum for $(basename "$2") on $ARCH; set APPIMAGETOOL and APPIMAGE_RUNTIME" >&2; exit 1; fi
+    if [ -f "$2" ] && echo "$3  $2" | sha256sum -c --status -; then return; fi
+    rm -f "$2"
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$2.part" "$1"
+    if ! echo "$3  $2.part" | sha256sum -c --status -; then
+      rm -f "$2.part"
+      echo "error: $1 does not match its pinned sha256 $3" >&2
+      exit 1
+    fi
+    mv "$2.part" "$2"
+  }
   TOOL="${APPIMAGETOOL:-$(command -v appimagetool || true)}"
   if [ -z "$TOOL" ]; then
-    TOOL="$CARGO_TARGET_DIR/appimagetool-$ARCH.AppImage"
-    if [ ! -x "$TOOL" ]; then
-      curl -fsSL -o "$TOOL" "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$ARCH.AppImage"
-      chmod +x "$TOOL"
-    fi
+    TOOL="$CARGO_TARGET_DIR/appimagetool-$APPIMAGETOOL_VERSION-$ARCH.AppImage"
+    fetch_pinned "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-$ARCH.AppImage" "$TOOL" "$TOOL_SHA256"
+    chmod +x "$TOOL"
+  fi
+  RUNTIME="${APPIMAGE_RUNTIME:-}"
+  if [ -z "$RUNTIME" ]; then
+    RUNTIME="$CARGO_TARGET_DIR/appimage-runtime-$APPIMAGE_RUNTIME_VERSION-$ARCH"
+    fetch_pinned "https://github.com/AppImage/type2-runtime/releases/download/$APPIMAGE_RUNTIME_VERSION/runtime-$ARCH" "$RUNTIME" "$RUNTIME_SHA256"
   fi
   # Absolute, because appimagetool runs in $DIST below (CARGO_TARGET_DIR or APPIMAGETOOL may be
   # relative, e.g. target/agent-<name>).
   OUT="$(cd "$DIST" && pwd)/$BASENAME.AppImage"
   APPDIR="$(cd "$APPDIR" && pwd)"
   TOOL="$(cd "$(dirname "$TOOL")" && pwd)/$(basename "$TOOL")"
+  RUNTIME="$(cd "$(dirname "$RUNTIME")" && pwd)/$(basename "$RUNTIME")"
   # A .zsync left by an earlier run would hide a missing zsyncmake and describe another file.
   rm -f "$OUT.zsync"
   # Update information: AppImageUpdate, AppImageLauncher and the like read it from the file and
@@ -131,7 +165,7 @@ if has appimage; then
   # Extract-and-run: works without FUSE (containers, CI). The output embeds the static runtime,
   # so users don't need libfuse2 either. With zsyncmake on the host (CI installs the zsync
   # package) appimagetool also writes the .zsync, into its working directory, hence the cd.
-  (cd "$DIST" && ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream -u "$UPDATE_INFO" "$APPDIR" "$OUT")
+  (cd "$DIST" && ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream --runtime-file "$RUNTIME" -u "$UPDATE_INFO" "$APPDIR" "$OUT")
   echo "wrote $OUT"
   if [ -s "$OUT.zsync" ]; then
     echo "wrote $OUT.zsync"

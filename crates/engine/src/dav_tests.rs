@@ -279,3 +279,12 @@ fn new_contacts_prefer_contacts_over_grommunio_recipient_cache() {
     let id = added["id"].as_u64().unwrap();
     assert_eq!(s.mailbox.contact(id).unwrap().origin.id, cache);
 }
+
+#[test]
+fn graph_account_kind_cannot_bypass_password_only_dav_validation() {
+    let mut s = Session::empty();
+    let before = serde_json::to_value(&s.mailbox.accounts).unwrap();
+    let result = s.run("account.add", &json!({"email":"noor@example.org", "kind":"microsoft", "davUrl":"https://group.example.org/dav/"}));
+    assert!(result.is_err());
+    assert_eq!(serde_json::to_value(&s.mailbox.accounts).unwrap(), before);
+}

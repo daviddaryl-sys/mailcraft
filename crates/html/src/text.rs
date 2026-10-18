@@ -251,7 +251,20 @@ struct Piece {
 
 /// The paragraphs `blocks` make, quoted `quote` deep on top of their own depth.
 fn pieces_of(blocks: &[Block], quote: usize, out: &mut Vec<Piece>) {
+    // How many paragraphs there were when the block before was done, and after.
+    let mut before = (usize::MAX, usize::MAX);
     for block in blocks {
+        let count = out.len();
+        // What stands in the line of the block before goes on in its paragraph.
+        if block.beside && before.1 > before.0 && !matches!(block.kind, BlockKind::Table(_)) {
+            let body = block_body(block);
+            if let Some(last) = out.last_mut().filter(|_| !body.is_empty()) {
+                last.body.push(' ');
+                last.body.push_str(&body);
+            }
+            before = (count, out.len().max(count.saturating_add(1)));
+            continue;
+        }
         let quote = quote.saturating_add(usize::from(block.quote));
         match &block.kind {
             BlockKind::Table(table) if table.layout => {
@@ -272,6 +285,7 @@ fn pieces_of(blocks: &[Block], quote: usize, out: &mut Vec<Piece>) {
                 }
             }
         }
+        before = (count, out.len());
     }
 }
 

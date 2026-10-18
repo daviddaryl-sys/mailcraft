@@ -19,5 +19,5 @@ concurrency:
 
 jobs:
   lint:
-    # Intentionally tracked at @main (not SHA-pinned) so org-wide CI improvements, security fixes, and build optimizations propagate without PR churn across all craftapp repos.
-    uses: storytold/craft-common-actions/.github/workflows/packaging-lint.yml@main
+    # Pinned to a full commit SHA of the shared workflow's main branch; moved by hand, after reading the change.
+    uses: storytold/craft-common-actions/.github/workflows/packaging-lint.yml@f0808a5ccbc32869248193ffab0de98d733de451 # main # zizmor: ignore[ref-version-mismatch]

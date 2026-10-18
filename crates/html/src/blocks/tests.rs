@@ -1015,6 +1015,8 @@ fn a_picture_takes_its_size_from_its_style_where_its_attributes_give_none() {
 /// What holds of every block, whatever the input.
 pub(crate) fn check_block(block: &Block, context: &str) {
     assert!(block.space <= MAX_SPACE, "{context}: {block:?}");
+    // Only a picture or text stands in the line of the block before.
+    assert!(!(block.beside && matches!(block.kind, BlockKind::Table(_) | BlockKind::Rule)), "{context}: {block:?}");
     match &block.kind {
         BlockKind::Rule => assert!(block.spans.is_empty(), "{context}"),
         BlockKind::Image { src, link, .. } => {
@@ -1029,6 +1031,7 @@ pub(crate) fn check_block(block: &Block, context: &str) {
                 for cell in &row.cells {
                     assert!((1..=MAX_TABLE_COLUMNS as u16).contains(&cell.colspan) && (1..=MAX_ROW_SPAN).contains(&cell.rowspan), "{context}");
                     assert_eq!(cell.blocks.first().map_or(0, |b| b.space), 0, "{context}: {block:?}");
+                    assert!(!cell.blocks.first().is_some_and(|b| b.beside), "{context}: {block:?}");
                     for inner in &cell.blocks {
                         check_block(inner, context);
                     }
@@ -1050,7 +1053,9 @@ pub(crate) fn check_block(block: &Block, context: &str) {
 proptest::proptest! {
     #[test]
     fn any_string_parses(s in proptest::prelude::any::<String>()) {
-        for block in parse(&s) {
+        let blocks = parse(&s);
+        proptest::prop_assert!(!blocks.first().is_some_and(|b| b.beside));
+        for block in blocks {
             check_block(&block, &s);
         }
     }
@@ -1075,4 +1080,38 @@ proptest::proptest! {
             check_block(block, &s);
         }
     }
+}
+
+/// #150: what stands in one line with a picture says so, and nothing else does.
+#[test]
+fn a_picture_in_a_line_of_text_stands_beside_it() {
+    let beside =
+        |html: &str| parse(html).iter().map(|b| (b.text(), matches!(b.kind, BlockKind::Image { .. }), b.beside, b.space)).collect::<Vec<_>>();
+    let pic = |beside: bool, space: u8| (String::new(), true, beside, space);
+    let text = |t: &str, beside: bool, space: u8| (t.to_string(), false, beside, space);
+    // A picture, then text in its line; text, then a picture in its line.
+    assert_eq!(beside("<p><img src='cid:a' width=24 height=24> <span>12</span></p>"), [pic(false, 0), text("12", true, 0)]);
+    assert_eq!(beside("<p>Total 7 <img src='cid:a' width=24 height=24></p>"), [text("Total 7", false, 0), pic(true, 0)]);
+    assert_eq!(beside("<td align=center><img src='cid:a'>&nbsp;<b>3</b> left</td>"), [pic(false, 0), text("3 left", true, 0)]);
+    // A block or a line break in between: a line of its own, and no blank line for the break.
+    assert_eq!(beside("<img src='cid:a'><div>3</div>"), [pic(false, 0), text("3", false, 0)]);
+    assert_eq!(beside("<img src='cid:a'><br>3"), [pic(false, 0), text("3", false, 0)]);
+    assert_eq!(beside("<p>first</p><img src='cid:a'>"), [text("first", false, 0), pic(false, 1)]);
+    // Pictures parted by no-break spaces are one line of pictures, not pictures with blank lines between.
+    assert_eq!(
+        beside(
+            "<p style='margin:12px 0 0 0'><a href='https://example.org/a'><img src='cid:a' width=20 height=20></a>&nbsp;&nbsp;<a href='https://example.org/b'><img src='cid:b' width=20 height=20></a> <img src='cid:c' width=20 height=20></p>"
+        ),
+        [pic(false, 0), pic(true, 0), pic(true, 0)]
+    );
+    // A paragraph of nothing but a no-break space is still an empty line.
+    assert_eq!(beside("<p>a</p><p>&nbsp;</p><p>b</p>"), [text("a", false, 0), text("b", false, 2)]);
+    // A cell starts afresh: what is in the next cell is not beside the picture before.
+    assert_eq!(beside("<table><tr><td><img src='cid:a'></td><td>12</td></tr></table>").len(), 1, "a table, whose cells hold their own lines");
+    let table = parse("<table><tr><td><img src='cid:a'></td><td>12</td></tr></table>");
+    let BlockKind::Table(t) = &table[0].kind else { panic!("{table:?}") };
+    assert!(t.rows.iter().flat_map(|r| &r.cells).all(|c| c.blocks.iter().all(|b| !b.beside)), "{t:?}");
+    // Plain text keeps the line: a space, not a line break.
+    assert_eq!(crate::to_text("<p>Activations <img src='cid:a' alt='denied'> 3</p><p>Next</p>"), "Activations [denied] 3\n\nNext");
+    assert_eq!(crate::to_text("<p><img src='cid:a'> 3</p>"), "3");
 }

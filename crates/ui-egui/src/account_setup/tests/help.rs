@@ -100,7 +100,8 @@ fn work_account(host: impl FnOnce(&mut MailApp)) -> Harness<'static, MailApp> {
 
 /// Who signed in, as an organisation's directory names them.
 fn signed_in_at_work() -> SignedIn {
-    SignedIn { tenant: ORGANISATION.into(), ..signed_in("Noor Haddad") }
+    // (Who signed in is left unsaid: these are taken for whichever account asked, #103.)
+    SignedIn { tenant: ORGANISATION.into(), email: String::new(), ..signed_in("Noor Haddad") }
 }
 
 /// Press one of the things to do: it is known by what it is called, with or without the
@@ -335,7 +336,8 @@ fn a_sign_in_refused_for_approval_shows_the_page_and_an_administrator_approves_f
     // …which now goes through: the account is added and its mail is under way.
     answer(&held, Ok(signed_in_at_work()));
     h.run_steps(6);
-    assert_eq!((page(&h), addresses(&h), synced.lock().unwrap().len()), (Some(Page::Done), vec!["noor@example.org".to_string()], 1));
+    // (Kept in step through Graph, R3: nothing by IMAP.)
+    assert_eq!((page(&h), addresses(&h), synced.lock().unwrap().len()), (Some(Page::Done), vec!["noor@example.org".to_string()], 0));
     assert!(says(&h, "noor@example.org is set up") && !h.state().signing_in());
 
     // Approved, and the sign-in is refused for an approval all the same (another permission,

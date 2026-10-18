@@ -284,6 +284,25 @@ fn attachments_come_and_go() {
 }
 
 #[test]
+fn attachments_are_opened_only_in_the_window() {
+    let mut s = session();
+    run(&mut s, "mail.new", json!({"to": "maya@lumen.example"}));
+    run(&mut s, "compose.attach", json!({"name": "notes.txt", "data": "aGVsbG8="}));
+    run(&mut s, "compose.attach", json!({"name": "setup.exe", "data": "aGVsbG8="}));
+    let id = run(&mut s, "compose.send", json!({}))["id"].as_u64().unwrap();
+    // Outside the window nothing is opened: an ordinary file says where it would be...
+    let e = s.run("mail.openAttachment", &json!({"id": id, "index": 0})).unwrap_err().to_string();
+    assert!(e.contains("window") && e.contains("mail.saveAttachment"), "{e}");
+    // ...and a program is refused for what it is.
+    let e = s.run("mail.openAttachment", &json!({"id": id, "index": 1})).unwrap_err().to_string();
+    assert!(e.contains("doesn't open setup.exe") && e.contains("Save As"), "{e}");
+    assert!(s.run("mail.openAttachment", &json!({"id": id, "index": 9})).is_err());
+    assert!(s.run("mail.openAttachment", &json!({"id": id})).is_err());
+    // Agents may not ask for it at all.
+    assert_eq!(crate::agent::access("mail.openAttachment"), Some(crate::agent::Access::Never));
+}
+
+#[test]
 fn folders_and_views() {
     let mut s = session();
     let r = run(&mut s, "folder.select", json!({"path": "inbox/projects/atlas"}));
@@ -2045,6 +2064,9 @@ fn hostile_params_never_panic() {
         json!({"conditions": [{"type": "x"}, 5, null], "actions": [{"type": "moveTo", "value": "x"}], "name": "r"}),
         json!({"email": "a@b.example", "incoming": {"host": "", "port": 1e9, "security": 5}, "outgoing": 7}),
         json!({"emails": [1, null, {"value": 2}], "phones": "x", "address": {"street": 5}, "birthday": 5, "workDays": [], "weekStart": 1}),
+        json!({"account": 1, "address": "a@example.org/../../me\r\n?$top=1#x"}),
+        json!({"account": 2, "address": "x".repeat(100_000)}),
+        json!({"id": 2, "address": "\u{0}@example.org", "email": "\u{202e}@example.org"}),
         json!({"account": 1, "download": {"account": 1, "calendar": "\u{0}", "from": 1e300, "events": [{"id": 5}, null], "contacts": {"id": "c"}}}),
         json!({"account": 1, "download": {
             "account": 1, "complete": true, "from": i64::MIN, "to": i64::MAX,
@@ -2056,6 +2078,12 @@ fn hostile_params_never_panic() {
         }}),
     ];
     let mut s = session();
+    // Shared mailboxes switched on, under a Microsoft account, so that their commands get past
+    // the door (#70).
+    s.shared_mailboxes = true;
+    let _ = s.run("account.add", &json!({"email": "owner@example.org", "kind": "microsoft"}));
+    // And one open, so that the folder pane's commands (Favorites, counts) meet its folders.
+    let _ = s.run("account.addSharedMailbox", &json!({"address": "support@example.org"}));
     let ids: Vec<&'static str> = s.registry.all().iter().map(|c| c.id).collect();
     for round in 0..2 {
         for id in &ids {
@@ -2220,4 +2248,16 @@ fn the_servers_folder_tree_is_here_before_its_mail() {
     let mut repaired = s.mailbox.clone();
     repaired.repair();
     assert_eq!(repaired.folders.len(), s.mailbox.folders.len());
+}
+
+#[test]
+fn a_windows_1250_contact_file_keeps_its_letters() {
+    // #185: a vCard 2.1 file with raw 8-bit values in Windows-1250 lost đ, ć, č and Š, because the
+    // bytes were read as UTF-8 before the CHARSET of each line was looked at.
+    let mut s = session();
+    let file: &[u8] = b"BEGIN:VCARD\r\nVERSION:2.1\r\nN;CHARSET=WINDOWS-1250:Gvo\xf0\xe6i\xe8;Ivana\r\nFN;CHARSET=WINDOWS-1250:Ivana Gvo\xf0\xe6i\xe8\r\nORG;CHARSET=WINDOWS-1250:\x8akola \xe8e\x9a\xe6e\r\nEMAIL;INTERNET:ivana@example.org\r\nEND:VCARD\r\n";
+    let read = crate::io::import(&mut s, "ivana.vcf", file, None).unwrap();
+    assert_eq!(read["contacts"], 1);
+    let c = s.mailbox.contact(s.sel.contact.unwrap()).unwrap();
+    assert_eq!((c.display_name.as_str(), c.last.as_str(), c.company.as_str()), ("Ivana Gvođćič", "Gvođćič", "Škola češće"));
 }

@@ -6,3 +6,6 @@ contact_links:
   - name: Try MailCraft on your Mac
     url: https://github.com/daviddaryl-sys/mailcraft/blob/main/TESTING.md
     about: Free downloads, sample-mail trial and installation help.
+  - name: Report a security vulnerability
+    url: https://github.com/UCS-Care-Group/mailcraft/security/advisories/new
+    about: Please report security problems privately, not in a public issue.

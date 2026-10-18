@@ -35,6 +35,7 @@ impl Class {
 pub const TABLE: &[(&str, Class)] = &[
     ("time", Class::Layer(0)),
     ("control-key", Class::Standalone),
+    ("charset", Class::Standalone),
     ("model", Class::Layer(1)),
     ("html", Class::Layer(1)),
     ("mime", Class::Layer(2)),
@@ -68,6 +69,11 @@ fn intra_layer_allowed(from: &str, to: &str) -> bool {
 /// External crates that constitute a UI toolkit / windowing dependency.
 /// Entries ending in `*` are prefixes.
 pub const UI_CRATES: &[&str] = &["egui", "eframe", "winit", "egui_kittest", "rfd", "bevy*"];
+
+/// External crates only the apps (the `Exempt` binaries) may use: craft-quit ends the process the
+/// platform's way (`-[NSApplication terminate:]` on macOS), which is the desktop app's decision,
+/// never a library's.
+pub const APP_ONLY_CRATES: &[&str] = &["craft-quit"];
 
 /// First layer allowed to use UI crates.
 pub const UI_MIN_LAYER: u8 = 6;
@@ -116,6 +122,7 @@ pub enum Violation {
     StandaloneHasWorkspaceDep { krate: String, dep: String },
     TestkitAsNormalDep { krate: String },
     UiBelowL6 { krate: String, dep: String, layer: u8 },
+    AppOnly { krate: String, dep: String },
 }
 
 impl std::fmt::Display for Violation {
@@ -135,6 +142,9 @@ impl std::fmt::Display for Violation {
             }
             Violation::UiBelowL6 { krate, dep, layer } => {
                 write!(f, "{krate} (L{layer}) depends on UI crate `{dep}`; UI toolkits are only allowed in L6+")
+            }
+            Violation::AppOnly { krate, dep } => {
+                write!(f, "{krate} depends on `{dep}`, which only the apps may use")
             }
         }
     }
@@ -183,6 +193,8 @@ pub fn check(crates: &[Crate]) -> Vec<Violation> {
                         }
                     }
                 }
+            } else if APP_ONLY_CRATES.contains(&d.name.as_str()) {
+                out.push(Violation::AppOnly { krate: c.name.clone(), dep: d.name.clone() });
             } else if layer < UI_MIN_LAYER && is_ui_crate(&d.name) {
                 out.push(Violation::UiBelowL6 { krate: c.name.clone(), dep: d.name.clone(), layer });
             }
@@ -309,6 +321,15 @@ mod tests {
     fn apps_and_xtask_exempt() {
         for app in ["mailcraft", "mailcraft-cli", "mailcraft-web", "xtask"] {
             assert!(check(&[c(app, &[("egui", Normal, false), ("mailcraft-ui-egui", Normal, true)])]).is_empty());
+        }
+    }
+
+    #[test]
+    fn craft_quit_is_for_the_apps_alone() {
+        assert!(check(&[c("mailcraft", &[("craft-quit", Normal, false)])]).is_empty());
+        for krate in ["mailcraft-ui-egui", "mailcraft-engine", "mailcraft-time"] {
+            let v = check(&[c(krate, &[("craft-quit", Normal, false)])]);
+            assert!(matches!(&v[..], [Violation::AppOnly { dep, .. }] if dep == "craft-quit"), "{krate}: {v:?}");
         }
     }
 

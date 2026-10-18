@@ -40,8 +40,14 @@ USAGE:
                                                 is sent)
   mailcraft-cli commands [--json]               list every command
   mailcraft-cli parity [--markdown]             feature-catalog parity
-  mailcraft-cli mcp [--connect HOST:PORT | --file F | --sample]
-                                                MCP server on stdio (headless, or bridged to the app)
+  mailcraft-cli mcp [--connect HOST:PORT | --file F | --sample] [--files DIR] [--allow CLASS,...]
+                                                MCP server on stdio (headless, or bridged to the app).
+                                                Agents get only what the owner allows: files only
+                                                inside --files DIR; sending, deleting for good,
+                                                accounts, the mailbox file and options are asked
+                                                about in the app (bridged) or refused (headless),
+                                                unless allowed with --allow send, delete, accounts,
+                                                mailbox, settings or input (clicking and typing)
   mailcraft-cli --version
 ";
 
@@ -49,12 +55,13 @@ USAGE:
 /// keeps it, with its messages' content in the folder `<file>.blobs` beside it.
 fn open(path: &str) -> Result<Session, String> {
     let opened = mailcraft_engine::store::open(std::path::Path::new(path))?;
-    if opened.unavailable > 0 {
-        eprintln!("warning: {path}: {} bodies or attachments are missing from its content folder, or damaged", opened.unavailable);
+    // Whatever of it couldn't be read: damaged saves left out, missing content.
+    if let Some(notice) = opened.notice() {
+        eprintln!("warning: {path}: {notice}");
     }
     let mut s = Session::new(opened.mailbox);
-    s.graph_mail = graph_mail_switch();
     s.path = Some(path.into());
+    s.shared_mailboxes = shared_mailboxes_switch();
     Ok(s)
 }
 
@@ -65,12 +72,38 @@ fn open_or_new(path: &str) -> Result<Session, String> {
     }
     let mut s = Session::new(Mailbox::with_local_account("", ""));
     s.path = Some(path.into());
+    s.shared_mailboxes = shared_mailboxes_switch();
     Ok(s)
 }
 
 fn sample() -> Session {
     let now = mailcraft_time::now();
-    Session::new(mailcraft_engine::sample::mailbox(now, mailcraft_time::local_offset_minutes(now)))
+    let mut s = Session::new(mailcraft_engine::sample::mailbox(now, mailcraft_time::local_offset_minutes(now)));
+    s.shared_mailboxes = shared_mailboxes_switch();
+    s
+}
+
+/// Shared mailboxes may be added and read (#70): `MAILCRAFT_SHARED_MAILBOXES=1`, for testing.
+fn shared_mailboxes_switch() -> bool {
+    std::env::var("MAILCRAFT_SHARED_MAILBOXES").is_ok_and(|value| value.trim() == "1")
+}
+
+/// Every `--allow` value, split at commas: what the owner lets an agent do without asking.
+fn allow_classes(args: &[String]) -> Result<Vec<mailcraft_mcp::Class>, String> {
+    let mut out = Vec::new();
+    for (i, a) in args.iter().enumerate() {
+        if a != "--allow" {
+            continue;
+        }
+        for name in args.get(i + 1).map(String::as_str).unwrap_or("").split(',').filter(|n| !n.trim().is_empty()) {
+            let names: Vec<&str> = mailcraft_mcp::Class::ALL.iter().map(|c| c.as_str()).collect();
+            let c = mailcraft_mcp::Class::parse(name).ok_or_else(|| format!("mcp: --allow {name}: not one of {}", names.join(", ")))?;
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {
@@ -167,11 +200,9 @@ fn write_stdout(write: impl FnOnce(&mut std::io::StdoutLock<'static>) -> std::io
     Ok(())
 }
 
-/// The switch for testing Microsoft accounts kept in step through Microsoft Graph (R3 spec S35):
-/// `MAILCRAFT_GRAPH_MAIL=1`.
-fn graph_mail_switch() -> bool {
-    std::env::var("MAILCRAFT_GRAPH_MAIL").is_ok_and(|value| value.trim() == "1")
-}
+/// What `sync` says when the owner signed in on the provider's page as somebody other than the
+/// account (#103): nothing of that sign-in is used. (It names nobody: this is printed.)
+const SOMEONE_ELSE: &str = "sync: you signed in as somebody other than this account; sign in again with the account's own address";
 
 /// `sync` for an account kept in step through Microsoft Graph: the folder changes made here go
 /// up and the folders are listed. The token for Graph is taken from `MAILCRAFT_ACCESS_TOKEN`, or
@@ -181,15 +212,33 @@ fn sync_graph(s: &mut Session, account: mailcraft_model::Id, path: &str) -> Resu
     let token = match std::env::var("MAILCRAFT_ACCESS_TOKEN") {
         Ok(token) => token,
         Err(_) => {
-            let mut oauth = s.mailbox.account(account).and_then(|a| a.oauth.clone()).unwrap_or_default();
+            // A shared mailbox is read with the sign-in of the account it is opened through (#70).
+            let signer = s.mailbox.owner_of(account).map_or(account, |owner| owner.id);
+            let hint = s.mailbox.account(signer).map(|a| a.email.clone()).unwrap_or_default();
+            let mut oauth = s.mailbox.account(signer).and_then(|a| a.oauth.clone()).unwrap_or_default();
             if oauth.client_id.is_empty() {
                 let built_in = option_env!("MAILCRAFT_MS_CLIENT_ID").unwrap_or_default().to_string();
                 oauth.client_id = std::env::var("MAILCRAFT_MS_CLIENT_ID").unwrap_or(built_in);
             }
             let open = |url: &str| eprintln!("sync: open this page in a browser to sign in:\n{url}");
             let cancel = std::sync::atomic::AtomicBool::new(false);
-            let resource = mailcraft_net::oauth::Resource::GraphMail;
-            mailcraft_net::oauth::sign_in_for(&oauth, &request.email, &open, &cancel, resource).map_err(|e| format!("sync: {e}"))?.access
+            let tokens = if request.shared && !request.sends.is_empty() {
+                // (And for sending from it, when something waits in its Outbox.)
+                let signed = mailcraft_net::oauth::sign_in_for_shared_send(&oauth, &hint, &open, &cancel);
+                signed.map_err(|refusal| format!("sync: sending from shared mailboxes wasn't allowed ({refusal:?})"))?
+            } else if request.shared {
+                let signed = mailcraft_net::oauth::sign_in_for_shared(&oauth, &hint, &open, &cancel);
+                signed.map_err(|refusal| format!("sync: shared mailboxes weren't allowed ({refusal:?})"))?
+            } else {
+                let resource = mailcraft_net::oauth::Resource::GraphMail;
+                mailcraft_net::oauth::sign_in_for(&oauth, &hint, &open, &cancel, resource).map_err(|e| format!("sync: {e}"))?
+            };
+            // (Whoever signs in has to be the account that reads it: a shared mailbox's owner.)
+            let username = s.mailbox.account(signer).map(|a| a.username.clone()).unwrap_or_default();
+            if tokens.someone_else(&hint, &username) {
+                return Err(SOMEONE_ELSE.to_string().into());
+            }
+            tokens.access
         }
     };
     let result = mailcraft_net::graph::sync_folders(&token, &request);
@@ -333,7 +382,6 @@ fn run(args: &[String]) -> Result<(), Failure> {
                 (None, true) => sample(),
                 (None, false) => Session::new(Mailbox::with_local_account("", "")),
             };
-            s.graph_mail = graph_mail_switch();
             let print = rest.iter().any(|a| a == "--print");
             let mut i = 0;
             while let Some(a) = rest.get(i) {
@@ -373,7 +421,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
                     .map(|a| a.id)
                     .ok_or("sync: no account in this mailbox is connected to a mail server")?,
             };
-            // An account kept in step through Microsoft Graph (R3, behind MAILCRAFT_GRAPH_MAIL=1):
+            // An account kept in step through Microsoft Graph (R3):
             // its folders, through Graph alone.
             if s.mailbox.account(account).is_some_and(|a| a.kind == mailcraft_model::AccountKind::Microsoft) {
                 return sync_graph(&mut s, account, path);
@@ -400,7 +448,12 @@ fn run(args: &[String]) -> Result<(), Failure> {
                                 )
                             };
                             let cancel = std::sync::atomic::AtomicBool::new(false);
-                            mailcraft_net::oauth::sign_in(&oauth, &request.account.email, &open, &cancel).map_err(|e| format!("sync: {e}"))?.access
+                            let tokens =
+                                mailcraft_net::oauth::sign_in(&oauth, &request.account.email, &open, &cancel).map_err(|e| format!("sync: {e}"))?;
+                            if tokens.someone_else(&request.account.email, &request.account.username) {
+                                return Err(SOMEONE_ELSE.to_string().into());
+                            }
+                            tokens.access
                         }
                     };
                 }
@@ -464,22 +517,30 @@ fn run(args: &[String]) -> Result<(), Failure> {
             }
         }
         "mcp" => {
-            positionals("mcp", &rest, &[value("--connect"), value("--file"), flag("--sample")])?;
+            positionals("mcp", &rest, &[value("--connect"), value("--file"), flag("--sample"), value("--files"), value("--allow")])?;
+            let allow = allow_classes(&rest)?;
+            let files = match arg_value(&rest, "--files") {
+                Some(dir) => Some(mailcraft_mcp::files::FilesDir::new(std::path::Path::new(&dir)).map_err(|e| format!("mcp: {e}"))?),
+                None => None,
+            };
             let backend: Box<dyn mailcraft_mcp::Backend> = match arg_value(&rest, "--connect") {
-                Some(addr) => {
-                    Box::new(mailcraft_mcp::Remote::connect(&addr).map_err(|e| format!("mcp: can't reach the MailCraft app at {addr}: {e}"))?)
-                }
+                Some(addr) => Box::new(
+                    mailcraft_mcp::Remote::connect(&addr)
+                        .map_err(|e| format!("mcp: can't reach the MailCraft app at {addr}: {e}"))?
+                        .with_allow(allow.clone()),
+                ),
                 None => {
                     let session = match (arg_value(&rest, "--file"), rest.iter().any(|a| a == "--sample")) {
                         (Some(f), _) => open(&f)?,
                         (None, true) => sample(),
                         (None, false) => Session::empty(),
                     };
-                    Box::new(mailcraft_mcp::Headless { session })
+                    Box::new(mailcraft_mcp::Headless::new(session, allow.clone()))
                 }
             };
+            let policy = mailcraft_mcp::tools::Policy { files, allow };
             // A client that hangs up ends the server quietly (`Failure::StdoutClosed`).
-            mailcraft_mcp::Server::new(backend).serve(std::io::stdin().lock(), std::io::stdout().lock())?;
+            mailcraft_mcp::Server::with_policy(backend, policy).serve(std::io::stdin().lock(), std::io::stdout().lock())?;
             Ok(())
         }
         "--version" | "-V" => write_stdout(|o| writeln!(o, "mailcraft-cli {}", env!("CARGO_PKG_VERSION"))),
@@ -574,7 +635,7 @@ mod tests {
         let kept = file("kept.mailcraft");
         run(&strings(&["import", &kept, &eml])).unwrap();
         assert!(std::path::Path::new(&format!("{kept}.blobs")).is_dir());
-        assert!(!std::fs::read_to_string(&kept).unwrap().contains("Line 150 of a long message"));
+        assert!(!String::from_utf8_lossy(&std::fs::read(&kept).unwrap()).contains("Line 150 of a long message"));
         let s = open(&kept).unwrap();
         let wrote = long.replace("\r\n", "\n");
         let text = |s: &Session| s.mailbox.messages.values().next().unwrap().body.text.replace("\r\n", "\n");

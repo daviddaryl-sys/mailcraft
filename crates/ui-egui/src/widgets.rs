@@ -7,9 +7,9 @@ use serde_json::Value;
 use crate::theme::{Tokens, regular, semibold};
 use crate::{MailApp, icons};
 
-/// Height of the ribbon content area (without group labels).
+/// Height of the ribbon content area, and of the groups' names under it (with the room between them).
 pub const CONTENT_H: f32 = 66.0;
-pub const LABEL_H: f32 = 16.0;
+pub const LABEL_H: f32 = 22.0;
 
 /// Shortcut text for a command (`⌘R` on macOS, `Ctrl+R` elsewhere): its first key.
 pub fn shortcut_text(app: &MailApp, id: &str) -> String {
@@ -76,7 +76,8 @@ fn text_w(ui: &Ui, text: &str, size: f32) -> f32 {
 
 /// Lay out and paint a large button of the classic ribbon: the icon over its label (of one line or
 /// two), greyed when it isn't `on`, pressed-looking when `checked`, with a `▾` when it opens a menu.
-pub(crate) fn big_frame(ui: &mut Ui, icon: &str, label: &str, on: bool, checked: bool, menu: bool) -> Response {
+/// Gives back where its label was painted too.
+pub(crate) fn big_frame(ui: &mut Ui, icon: &str, label: &str, on: bool, checked: bool, menu: bool) -> (Response, Rect) {
     let t = Tokens::get(ui.ctx());
     let galley_w = label.split('\n').map(|l| text_w(ui, l, 11.5)).fold(0.0, f32::max);
     let w = (galley_w + if menu { 20.0 } else { 12.0 }).max(46.0);
@@ -89,12 +90,14 @@ pub(crate) fn big_frame(ui: &mut Ui, icon: &str, label: &str, on: bool, checked:
     icons::paint(ui.painter(), ic, icon, c, a);
     let mut y = r.min.y + 41.0;
     let lines: Vec<&str> = label.split('\n').collect();
+    let mut painted = Rect::NOTHING;
     for (i, l) in lines.iter().enumerate() {
         let txt = if menu && i + 1 == lines.len() { format!("{l} ▾") } else { (*l).to_string() };
-        ui.painter().text(pos2(r.center().x, y), Align2::CENTER_TOP, txt, regular(11.5), if on { t.text } else { t.text_disabled });
+        let colour = if on { t.text } else { t.text_disabled };
+        painted = painted.union(ui.painter().text(pos2(r.center().x, y), Align2::CENTER_TOP, txt, regular(11.5), colour));
         y += 13.0;
     }
-    resp
+    (resp, painted)
 }
 
 /// Lay out and paint a small button of the classic ribbon: a 17 px icon with its label beside it.
@@ -128,6 +131,7 @@ pub fn stack(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 /// A ribbon group: content, a centred label below and a divider on the right.
 pub fn group(ui: &mut Ui, title: &str, app: &mut MailApp, add: impl FnOnce(&mut Ui, &mut MailApp)) {
     let t = Tokens::get(ui.ctx());
+    let key = crate::ribbon::hit_id(title);
     let title = tl!(title);
     let label_w = text_w(ui, title, 11.0);
     let start = ui.cursor().min;
@@ -140,7 +144,9 @@ pub fn group(ui: &mut Ui, title: &str, app: &mut MailApp, add: impl FnOnce(&mut 
     });
     let r = inner.response.rect;
     let r = Rect::from_min_max(start, pos2(r.max.x, start.y + CONTENT_H + LABEL_H));
-    ui.painter().text(pos2(r.center().x, r.max.y - 8.0), Align2::CENTER_CENTER, title, regular(11.0), t.group_label);
+    // The group's name, with room above it under the buttons' labels.
+    let at = ui.painter().text(pos2(r.center().x, r.max.y - 8.0), Align2::CENTER_CENTER, title, regular(11.0), t.group_label);
+    app.hit.add("ribbonGroup", key, at);
     ui.add_space(5.0);
     let x = ui.cursor().min.x;
     ui.painter().line_segment([pos2(x, start.y + 4.0), pos2(x, start.y + CONTENT_H + LABEL_H - 4.0)], Stroke::new(1.0, t.border));

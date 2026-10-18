@@ -3,6 +3,7 @@ name = "mailcraft-net"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "MailCraft network transport for the desktop app and CLI: TLS sockets, sending through SMTP, synchronising with IMAP, OAuth sign-in, MX lookup (empty on wasm: a browser can't open sockets)"
 
 [lints]

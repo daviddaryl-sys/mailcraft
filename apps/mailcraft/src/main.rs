@@ -19,6 +19,7 @@
 mod apple_events;
 #[cfg(test)]
 mod approval_flow;
+mod browser;
 #[cfg(test)]
 mod calendar_flow;
 mod clipboard;
@@ -31,11 +32,17 @@ mod favorites_organisation_flow;
 mod file_dialogs;
 #[cfg(test)]
 mod graph_folders_flow;
+#[cfg(test)]
+mod graph_mail_flow;
 #[cfg(any(target_os = "windows", test))]
 mod graphics;
 mod logging;
+mod opened_files;
 mod picture_cache;
+mod quit;
 mod secrets;
+#[cfg(test)]
+mod shared_send_flow;
 mod single_instance;
 
 use std::path::PathBuf;
@@ -82,13 +89,11 @@ impl eframe::App for App {
         if let Some(pos) = ctx.input(|i| take_rescue(&mut self.1, i.viewport())) {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
-        // The window's close button: a message being written asks first (`MailApp::close_requested`).
-        if ctx.input(|i| i.viewport().close_requested()) && !self.0.close_requested() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-        }
-        if self.0.quit_requested {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        }
+        // Pages to open, with the browser brought in front (`browser`).
+        open_pages(ctx, frame);
+        // Leaving (the close button, Quit, the Dock): a message being written asks first, then
+        // the platform's own way out (`quit`). Last in `logic`, which runs while minimized too.
+        quit::on_frame(ctx, &mut self.0);
     }
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         self.0.raw_input_hook(raw);
@@ -96,6 +101,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.0.ui(ui);
         self.3.show(frame);
+        open_pages(ui.ctx(), frame);
     }
     fn on_exit(&mut self) {
         save_prefs(&self.0);
@@ -103,6 +109,10 @@ impl eframe::App for App {
         // saver is still writing.
         if let Err(e) = self.0.save_on_exit() {
             log::error!("saving the mailbox on exit failed: {e}");
+        }
+        // The attachments opened in this run (#126).
+        if let Some(opened) = OPENED.get() {
+            opened.clear();
         }
         // What is still to be noted of the pictures kept on disk.
         if let Some(pictures) = PICTURES.get() {
@@ -148,18 +158,38 @@ fn keep_pictures() -> Option<std::sync::Arc<picture_cache::Cache>> {
     Some(cache)
 }
 
+/// The attachments the owner opened in this run (`opened_files`), in this user's cache folder.
+static OPENED: std::sync::OnceLock<opened_files::Opened> = std::sync::OnceLock::new();
+
+/// Where opened attachments are written, and what earlier runs left there a day ago and more
+/// tidied a moment later, off the window's thread. None when there is no cache folder.
+fn opened_files() -> Option<&'static opened_files::Opened> {
+    let base = opened_files::base()?;
+    let opened = OPENED.get_or_init(|| opened_files::Opened::at(base));
+    let tidy = || {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        if let Some(opened) = OPENED.get() {
+            opened.tidy(opened_files::MAX_AGE);
+        }
+    };
+    if let Err(e) = std::thread::Builder::new().name("opened attachments tidying".into()).spawn(tidy) {
+        log::debug!("the opened attachments were not tidied: {e}");
+    }
+    Some(opened)
+}
+
 /// Where the log files live: `logs` in the preferences folder (see `logging`).
 fn log_dir() -> Option<PathBuf> {
     Some(prefs_path()?.parent()?.join("logs"))
 }
 
-/// The switch for testing Microsoft accounts kept in step through Microsoft Graph (R3 spec S35):
-/// `MAILCRAFT_GRAPH_MAIL=1`. Off, Add Account makes them as it always did (on IMAP), and nothing
-/// else is any different.
-fn graph_mail_switch() -> bool {
-    let on = std::env::var("MAILCRAFT_GRAPH_MAIL").is_ok_and(|value| value.trim() == "1");
+/// The switch for testing shared mailboxes through Microsoft Graph (#70):
+/// `MAILCRAFT_SHARED_MAILBOXES=1`. Off, Add Shared Mailbox isn't offered and none is read, so
+/// that nobody is asked for a shared mailbox's permission by a build that only reads one.
+fn shared_mailboxes_switch() -> bool {
+    let on = std::env::var("MAILCRAFT_SHARED_MAILBOXES").is_ok_and(|value| value.trim() == "1");
     if on {
-        log::info!("Microsoft accounts may be kept in step through Microsoft Graph (MAILCRAFT_GRAPH_MAIL=1, for testing)");
+        log::info!("shared mailboxes may be added and read (MAILCRAFT_SHARED_MAILBOXES=1, for testing)");
     }
     on
 }
@@ -174,12 +204,32 @@ fn load_prefs(app: &mut MailApp) {
     if !prefs_enabled() {
         return;
     }
-    if let Some(p) = prefs_path()
-        && let Ok(bytes) = std::fs::read(&p)
-        && let Ok(ui) = serde_json::from_slice::<UiState>(&bytes)
-    {
+    if let Some(ui) = prefs_path().and_then(|p| read_prefs(&p)) {
         app.apply_prefs(ui);
     }
+}
+
+/// The preferences in `path`. A file that can't be read as them (damaged, or written by a version
+/// that keeps them otherwise) is moved aside to `ui.json.damaged`, so the next save doesn't
+/// overwrite what the owner had set and it can still be looked at.
+fn read_prefs(path: &std::path::Path) -> Option<UiState> {
+    let bytes = std::fs::read(path).ok()?;
+    let ui = serde_json::from_slice::<UiState>(&bytes);
+    if ui.is_err() {
+        let mut aside = path.as_os_str().to_os_string();
+        aside.push(".damaged");
+        let _ = std::fs::rename(path, aside);
+    }
+    ui.ok()
+}
+
+/// Write the preferences so that a crash leaves the old file or the whole new one, readable by
+/// its owner only.
+fn write_prefs(path: &std::path::Path, ui: &UiState) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    mailcraft_engine::store::write_atomic(path, &serde_json::to_vec_pretty(ui).map_err(std::io::Error::other)?)
 }
 
 /// The saved window geometry, read before the window opens (`load_prefs` runs after).
@@ -187,8 +237,7 @@ fn saved_window() -> Option<WindowGeometry> {
     if !prefs_enabled() {
         return None;
     }
-    let bytes = std::fs::read(prefs_path()?).ok()?;
-    serde_json::from_slice::<UiState>(&bytes).ok()?.window?.sanitized()
+    read_prefs(&prefs_path()?)?.window?.sanitized()
 }
 
 fn save_prefs(app: &MailApp) {
@@ -196,12 +245,7 @@ fn save_prefs(app: &MailApp) {
         return;
     }
     if let Some(p) = prefs_path() {
-        if let Some(dir) = p.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(bytes) = serde_json::to_vec_pretty(&app.prefs()) {
-            let _ = std::fs::write(&p, bytes);
-        }
+        let _ = write_prefs(&p, &app.prefs());
     }
 }
 
@@ -231,17 +275,112 @@ fn microsoft_client_id() -> String {
 }
 
 /// Open one of Microsoft's pages in the system's browser: whether a browser could be started.
-/// (The same call the window's own links end in; made here so that a browser that can't be
-/// started is known of, instead of leaving the owner looking at a page that waits.) The address
-/// is not for the log: it names who is signing in.
+/// (Made here, rather than through the window's own links, so that a browser that can't be
+/// started is known of, instead of leaving the owner looking at a page that waits.) On Linux and
+/// FreeBSD the window hands the browser its activation token, so that it comes in front
+/// (`browser`). The address is not for the log: it names who is signing in.
 fn open_in_browser(url: &str) -> bool {
-    match webbrowser::open(url) {
-        Ok(()) => true,
-        Err(e) => {
-            log::warn!("couldn't start a browser for Microsoft's page ({:?})", e.kind());
-            false
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    if let Some(browser) = BROWSER.get() {
+        return browser.open_and_wait(url);
+    }
+    browser::system_open(url)
+}
+
+/// The pages waiting for the window's activation token (`browser`), set once before the window opens.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+static BROWSER: std::sync::OnceLock<browser::Browser<winit::event_loop::AsyncRequestSerial>> = std::sync::OnceLock::new();
+
+/// The links the window followed in this frame, and the pages asked for since the last: each
+/// asks winit for an activation token, and opens when it comes (`WithTokens`) or is overdue.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn open_pages(ctx: &egui::Context, frame: &eframe::Frame) {
+    use winit::platform::startup_notify::WindowExtStartupNotify as _;
+    let Some(browser) = BROWSER.get() else { return };
+    browser.follow(browser::take_links(ctx));
+    let window = frame.winit_window();
+    let mut request = || window.and_then(|w| w.request_activation_token().ok());
+    if let Some(next) = browser.pump(&mut request, std::time::Instant::now()) {
+        ctx.request_repaint_after(next);
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+fn open_pages(_ctx: &egui::Context, _frame: &eframe::Frame) {}
+
+/// eframe's own handling of winit's events, and the activation tokens the window asked for
+/// (`open_pages`), which eframe would drop, handed to the pages waiting for them.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+struct WithTokens<'a>(eframe::EframeWinitApplication<'a>);
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+impl winit::application::ApplicationHandler<eframe::UserEvent> for WithTokens<'_> {
+    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        self.0.resumed(event_loop);
+    }
+    fn window_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        window_id: winit::window::WindowId,
+        event: winit::event::WindowEvent,
+    ) {
+        match event {
+            winit::event::WindowEvent::ActivationTokenDone { serial, token } => {
+                if let Some(browser) = BROWSER.get() {
+                    browser.token_arrived(&serial, token.into_raw());
+                }
+            }
+            event => self.0.window_event(event_loop, window_id, event),
         }
     }
+    fn new_events(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, cause: winit::event::StartCause) {
+        self.0.new_events(event_loop, cause);
+    }
+    fn user_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, event: eframe::UserEvent) {
+        self.0.user_event(event_loop, event);
+    }
+    fn device_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, device_id: winit::event::DeviceId, event: winit::event::DeviceEvent) {
+        self.0.device_event(event_loop, device_id, event);
+    }
+    fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        self.0.about_to_wait(event_loop);
+    }
+    fn suspended(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        self.0.suspended(event_loop);
+    }
+    fn exiting(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        self.0.exiting(event_loop);
+    }
+    fn memory_warning(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        self.0.memory_warning(event_loop);
+    }
+}
+
+/// Run the window: on Linux and FreeBSD on an event loop of our own, so that the activation
+/// tokens reach `WithTokens`; elsewhere as eframe runs it.
+fn run_window(options: eframe::NativeOptions, creator: eframe::AppCreator<'_>) -> eframe::Result {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        let _ = BROWSER.set(browser::Browser::new(std::sync::Arc::new(browser::Desktop)));
+        let event_loop = winit::event_loop::EventLoop::<eframe::UserEvent>::with_user_event().build()?;
+        // eframe keeps a start-up failure to itself on this path: the app is only created once
+        // the window is, so a loop that ends without having created it failed to start.
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = started.clone();
+        let creator: eframe::AppCreator<'_> = Box::new(move |cc| {
+            seen.store(true, std::sync::atomic::Ordering::Relaxed);
+            creator(cc)
+        });
+        let mut app = WithTokens(eframe::create_native("MailCraft", options, creator, &event_loop));
+        event_loop.run_app(&mut app)?;
+        if started.load(std::sync::atomic::Ordering::Relaxed) {
+            Ok(())
+        } else {
+            Err(eframe::Error::AppCreation("the window couldn't be started (see the log)".into()))
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    eframe::run_native("MailCraft", options, creator)
 }
 
 /// Sign an account's owner in: quietly with what was kept from last time when there is any, on
@@ -282,6 +421,18 @@ fn sign_in_with(request: SignInRequest, open_page: &dyn Fn(&str) -> bool) -> Res
     // asked a second time.
     if request.graph && request.favorites {
         let asked = mailcraft_net::oauth::sign_in_for_favorites(&request.oauth, &request.email, &open, &request.cancel);
+        return asked.map_err(|refusal| unopened(favorites_refusal(refusal)));
+    }
+    // A shared mailbox is to be read (#70): the page comes up for what reading shared mailboxes
+    // takes, by itself, in the same words for a no as the Favorites'.
+    // Mail is to be sent from a shared mailbox for the first time, and the owner said go ahead
+    // (#70): the page comes up for what sending from shared mailboxes takes too, by itself.
+    if request.graph && request.shared && request.shared_send {
+        let asked = mailcraft_net::oauth::sign_in_for_shared_send(&request.oauth, &request.email, &open, &request.cancel);
+        return asked.map_err(|refusal| unopened(favorites_refusal(refusal)));
+    }
+    if request.graph && request.shared {
+        let asked = mailcraft_net::oauth::sign_in_for_shared(&request.oauth, &request.email, &open, &request.cancel);
         return asked.map_err(|refusal| unopened(favorites_refusal(refusal)));
     }
     // A sign-in on the page, at `endpoints`: how it ended, when it brought no tokens. (How, and
@@ -434,15 +585,21 @@ fn graph_in(request: GraphRequest, zone: &str) -> GraphResult {
     // the window wants that too (it stops wanting it for the day once it was told no).
     // (An account kept in step through Graph has its token asked for with its mail, R3.)
     let mail = request.mail.is_some();
-    graph_with(request, zone, &|settings, refresh, favorites| {
-        if mail {
+    // (A shared mailbox's, with what reading shared mailboxes takes: #70.)
+    let shared = request.mail.as_ref().is_some_and(|mail| mail.shared);
+    let renew: Renew<'_> = &|settings, refresh, favorites| {
+        if shared {
+            oauth::refresh_graph_shared(settings, refresh)
+        } else if mail {
             oauth::refresh_graph_mail(settings, refresh)
         } else if favorites {
             oauth::refresh_graph_with_favorites(settings, refresh)
         } else {
             oauth::refresh_graph(settings, refresh)
         }
-    })
+    };
+    // (And for sending from a shared mailbox, when it has mail to send: #70.)
+    graph_sending_with(request, zone, renew, &oauth::refresh_graph_shared_send)
 }
 
 /// How a job gets a token for Microsoft Graph when the window handed it none: from the sign-in
@@ -458,12 +615,47 @@ fn favorites_words(error: &mailcraft_net::NetError) -> &'static str {
     }
 }
 
-/// [`graph_in`], with the token coming from `renew` when the request brings none.
+/// [`graph_in`], with the token coming from `renew` when the request brings none (and, for a
+/// shared mailbox's mail to send, from `renew` too).
+#[cfg(test)]
 fn graph_with(request: GraphRequest, zone: &str, renew: Renew<'_>) -> GraphResult {
+    graph_sending_with(request, zone, renew, &|settings, refresh| renew(settings, refresh, false))
+}
+
+/// How a shared mailbox's run that has mail to send gets a token that covers sending from it
+/// (`Mail.Send.Shared`, #70) when the window handed it none.
+type RenewSend<'a> = &'a dyn Fn(&mailcraft_model::OAuth, &str) -> Result<mailcraft_net::oauth::GraphTokens, mailcraft_net::NetError>;
+
+/// [`graph_in`], with the token coming from `renew` when the request brings none, and from
+/// `renew_send` for a shared mailbox's run that has mail to send.
+fn graph_sending_with(mut request: GraphRequest, zone: &str, renew: Renew<'_>, renew_send: RenewSend<'_>) -> GraphResult {
     use mailcraft_model::remote::{FavoritesDownload, FavoritesOutcome};
     use mailcraft_net::{NetError, graph};
     let mut out = GraphResult { account: request.account.id, ..Default::default() };
     let mut access = request.access.clone();
+    // A shared mailbox with mail to send (#70): the token covers sending from it, or nothing of
+    // it is sent this run (it waits, and the window asks the owner when he asked for the run).
+    // Its changes and drafts go all the same, with what reading it takes.
+    let sending_shared = request.mail.as_ref().is_some_and(|mail| mail.shared && !mail.sends.is_empty());
+    if access.is_empty() && sending_shared {
+        match renew_send(&request.oauth, &request.refresh) {
+            Ok(got) => {
+                access = got.tokens.access.clone();
+                out.tokens = Some(got.tokens);
+            }
+            Err(e) => {
+                if e.is_consent_needed() {
+                    log::info!("graph sending: sending from a shared mailbox isn't allowed yet; its mail waits for the owner's permission");
+                    out.send_consent_needed = true;
+                } else {
+                    log::info!("graph sending: no token for sending from a shared mailbox ({e}); its mail waits");
+                }
+                if let Some(mail) = request.mail.as_mut() {
+                    mail.sends.clear();
+                }
+            }
+        }
+    }
     if access.is_empty() {
         // For everything Graph is asked for; a sign-in from before the newest of it was asked
         // for gets its tokens for what it covers, and says what is missing.
@@ -476,12 +668,19 @@ fn graph_with(request: GraphRequest, zone: &str, renew: Renew<'_>) -> GraphResul
                 out.tokens = Some(got.tokens);
             }
             Err(e) if e.is_consent_needed() => {
+                log::info!("graph: the sign-in doesn't cover what was asked for; the owner's permission is needed");
                 out.consent_needed = true;
                 return out;
             }
-            // A sign-in that has run out is the mail's to notice and ask about, once.
-            Err(e) if e.is_refused_sign_in() => return out,
+            // A sign-in that has run out: the window asks the owner (the mail's leg does for an
+            // account on IMAP; for one kept in step through Graph, the Graph run does).
+            Err(e) if e.is_refused_sign_in() => {
+                log::info!("graph: the sign-in was refused when a token was asked for");
+                out.sign_in_refused = true;
+                return out;
+            }
             Err(e) => {
+                log::warn!("graph: the sign-in couldn't be renewed: {e}");
                 out.errors.push(format!("Couldn't reach Microsoft for sending, the calendar and the contacts: {e}"));
                 return out;
             }
@@ -511,17 +710,41 @@ fn graph_with(request: GraphRequest, zone: &str, renew: Renew<'_>) -> GraphResul
     }
     // An account kept in step through Graph (R3): the folder changes made here go up, and every
     // folder is listed. (Nothing of a folder's name or id goes into the log.)
+    if refused && request.mail.is_some() {
+        log::warn!("graph mail: the token stopped working while sending; the mail waits for the next run");
+    }
     if let Some(mail) = request.mail.as_ref().filter(|_| !refused) {
-        let result = graph::sync_folders(&access, mail);
-        log::info!(
-            "graph folders: {} of {} changes answered, {} folders listed, complete: {}, {} problems",
-            result.changes.len(),
-            mail.changes.len(),
-            result.listing.as_ref().map_or(0, |listing| listing.folders.len()),
-            result.listing.as_ref().is_some_and(|listing| listing.complete),
-            result.errors.len()
-        );
-        out.mail = Some(result);
+        // The run comes a piece at a time (the folders, then a page of mail at a time): to the
+        // window as each comes, or put together for a caller that takes it in at once.
+        let mut result: Option<mailcraft_model::sync::GraphMailResult> = None;
+        let (cancel, pieces) = (&request.cancel, &request.mail_pieces);
+        graph::sync_mail(&access, mail, cancel, &mut |piece| match pieces {
+            Some(to) => {
+                let summary = (piece.listing.as_ref().map(|l| l.folders.len()), piece.errors.len());
+                // Nobody is listening any more (the window closed): stop.
+                if to.send(piece).is_err() {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                if let (Some(folders), problems) = summary {
+                    log::info!("graph folders: {folders} folders listed, {problems} problems");
+                }
+            }
+            None => match &mut result {
+                Some(all) => all.absorb(piece),
+                None => result = Some(piece),
+            },
+        });
+        if let Some(result) = result {
+            log::info!(
+                "graph folders: {} of {} changes answered, {} folders listed, complete: {}, {} problems",
+                result.changes.len(),
+                mail.changes.len(),
+                result.listing.as_ref().map_or(0, |listing| listing.folders.len()),
+                result.listing.as_ref().is_some_and(|listing| listing.complete),
+                result.errors.len()
+            );
+            out.mail = Some(result);
+        }
     }
     // What was made, moved, changed or deleted in the calendar here goes up before the calendar
     // comes down: what comes down then is what the server has after it.
@@ -749,7 +972,8 @@ fn free_busy(request: FreeBusyRequest) -> FreeBusyResult {
 
 /// What the app needs from the system: native file dialogs, shown without blocking the window
 /// (`file_dialogs`); everything that opens a socket (Send/Receive, signing in, finding a domain's
-/// mail servers, checking an account), each on a background thread; and the credential store.
+/// mail servers, checking an account, asking whether a new version is out), each on a background
+/// thread; and the credential store.
 /// `kept_pictures` is where downloaded pictures are kept between runs, when they are.
 fn services(file_dialog: file_dialogs::Hook, ctx: egui::Context, kept_pictures: Option<std::sync::Arc<picture_cache::Cache>>) -> Services {
     let pictures_ctx = ctx.clone();
@@ -759,6 +983,10 @@ fn services(file_dialog: file_dialogs::Hook, ctx: egui::Context, kept_pictures: 
     let discovery_ctx = ctx.clone();
     let check_ctx = ctx.clone();
     let approval_ctx = ctx.clone();
+    let fetch_ctx = ctx.clone();
+    let search_ctx = ctx.clone();
+    let update_ctx = ctx.clone();
+    let copy_ctx = ctx.clone();
     let (sync_ctx, sign_in_ctx, graph_ctx, mx_ctx, test_ctx) = (ctx.clone(), ctx.clone(), ctx.clone(), ctx.clone(), ctx);
     let sync_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cancel = sync_cancel.clone();
@@ -793,6 +1021,14 @@ fn services(file_dialog: file_dialogs::Hook, ctx: egui::Context, kept_pictures: 
         })),
         graph: Some(Box::new(move |request| background(&graph_ctx, "microsoft graph", move || graph(request)))),
         dav: Some(Box::new(move |request| background(&dav_ctx, "calendar and contacts", move || mailcraft_net::dav::sync(request)))),
+        // Messages of a Microsoft account fetched whole, a few at a time (R3.2).
+        graph_fetch: Some(Box::new(move |job: mailcraft_ui_egui::graph_fetch::GraphFetchJob| {
+            background(&fetch_ctx, "message download", move || mailcraft_net::graph::fetch_messages(&job.access, &job.request, &job.cancel))
+        })),
+        // A Microsoft mailbox searched on its server, a page at a time, on the owner's click (R6.2).
+        graph_search: Some(Box::new(move |job: mailcraft_ui_egui::server_search::GraphSearchJob| {
+            background(&search_ctx, "server search", move || mailcraft_net::graph::search_messages(&job.access, &job.request))
+        })),
         lookup_mx: Some(Box::new(move |domain| {
             background(&mx_ctx, "mail exchangers", move || mailcraft_net::lookup_mx(&domain).map_err(|e| e.to_string()))
         })),
@@ -807,6 +1043,11 @@ fn services(file_dialog: file_dialogs::Hook, ctx: egui::Context, kept_pictures: 
                 }
                 Ok(())
             })
+        })),
+        // The copy of the mailbox kept before an account switches to Microsoft Graph: a large
+        // mailbox takes a while to write, and the window shows a spinner meanwhile (#118).
+        write_copy: Some(Box::new(move |path, mailbox| {
+            background(&copy_ctx, "mailbox copy", move || mailcraft_engine::store::save_single(&path, &mailbox).map(|_| ()))
         })),
         // A picture a message keeps on the web, once the owner asked for that message's pictures.
         // The address is the message's choice, so `fetch` checks where it leads before it goes
@@ -830,11 +1071,22 @@ fn services(file_dialog: file_dialogs::Hook, ctx: egui::Context, kept_pictures: 
             let ctx = approval_ctx.clone();
             background(&approval_ctx, "admin consent", move || admin_consent(&ctx, request))
         })),
+        // An attachment the owner opened (double-click, Open): written into MailCraft's own
+        // folder and opened with the system's program for its kind (#126).
+        open_file: opened_files()
+            .map(|opened| Box::new(move |name: &str, bytes: &[u8]| opened.open(name, bytes)) as Box<dyn Fn(&str, &[u8]) -> Result<(), String>>),
         secrets: secrets::store(),
         clipboard: clipboard::board(),
         // Help › Copy Diagnostics: the version, the platform and the redacted end of the logs.
         diagnostics: Some(Box::new(|| diagnostics::report(env!("CARGO_PKG_VERSION"), build_sha(), log_dir().filter(|_| prefs_enabled()).as_deref()))),
         microsoft_client_id: microsoft_client_id(),
+        // Whether a new version is out: GitHub is asked about this build's repository and told
+        // nothing else, once a day when the owner wants that, or when they press Check for Updates.
+        update_check: Some(Box::new(move |pre_releases| {
+            background(&update_ctx, "update check", move || mailcraft_net::update::latest(pre_releases).map_err(|e| e.to_string()))
+        })),
+        // A build that isn't one of the project's packages (they name their commit) never asks.
+        development_build: build_sha() == "dev",
         ..Default::default()
     }
 }
@@ -853,29 +1105,36 @@ fn build_sha() -> &'static str {
     option_env!("MAILCRAFT_BUILD_SHA").map(|s| s.get(..8).unwrap_or(s)).unwrap_or("dev")
 }
 
-/// The mailbox to start with, the file it is kept in (none for the sample, or without prefs) and
-/// how many bodies and attachments couldn't be read back from the content folder beside it.
-fn first_mailbox(sample: bool, chosen: Option<PathBuf>) -> (Mailbox, Option<PathBuf>, usize) {
+/// The mailbox to start with, the file it is kept in (none for the sample, or without prefs),
+/// how many bodies and attachments couldn't be read back from the content folder beside it, and
+/// whether part of the mailbox file itself was damaged and left out.
+fn first_mailbox(sample: bool, chosen: Option<PathBuf>) -> (Mailbox, Option<PathBuf>, usize, bool) {
     let now = mailcraft_time::now();
     if sample {
-        return (mailcraft_engine::sample::mailbox(now, mailcraft_time::local_offset_minutes(now)), None, 0);
+        return (mailcraft_engine::sample::mailbox(now, mailcraft_time::local_offset_minutes(now)), None, 0, false);
     }
     let ours = chosen.is_none();
     let path = chosen.or_else(|| default_mailbox_path().filter(|_| prefs_enabled()));
-    let Some(path) = path else { return (Mailbox::with_local_account("", ""), None, 0) };
+    let Some(path) = path else { return (Mailbox::with_local_account("", ""), None, 0, false) };
     if !path.exists() {
         // A first start: the settings folder has to be there for the mailbox to be saved in it.
         if ours && let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        return (Mailbox::with_local_account("", ""), Some(path), 0);
+        return (Mailbox::with_local_account("", ""), Some(path), 0, false);
     }
     match mailcraft_engine::store::open(&path) {
-        Ok(opened) => (opened.mailbox, Some(path), opened.unavailable),
+        Ok(opened) => {
+            if let Some(notice) = opened.notice() {
+                log::warn!("{}: {notice}", path.display());
+            }
+            let damaged = opened.lost_saves > 0 || opened.unfinished > 0 || opened.lost_records > 0;
+            (opened.mailbox, Some(path), opened.unavailable, damaged)
+        }
         Err(e) => {
             // Never write over a mailbox that couldn't be read: start empty, keep nothing, say why.
             log::error!("{e}");
-            (Mailbox::with_local_account("", ""), None, 0)
+            (Mailbox::with_local_account("", ""), None, 0, false)
         }
     }
 }
@@ -989,16 +1248,22 @@ fn main() -> eframe::Result {
     let apple_events = apple_events::AppleEvents::install();
     #[cfg(target_os = "macos")]
     let apple_events = &apple_events;
-    eframe::run_native(
-        "MailCraft",
+    run_window(
         options,
         Box::new(move |cc| {
-            let (mailbox, path, unavailable) = first_mailbox(sample, mailbox_path);
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            if let Some(browser) = BROWSER.get() {
+                browser.set_window(&cc.egui_ctx);
+            }
+            let (mailbox, path, unavailable, damaged) = first_mailbox(sample, mailbox_path);
             let (file_dialog, dialogs) = file_dialogs::hook(&cc.egui_ctx);
             let mut session = Session::new(mailbox);
-            session.graph_mail = graph_mail_switch();
+            session.shared_mailboxes = shared_mailboxes_switch();
             let kept = path.is_some();
             session.path = path;
+            // Search answers from a word index kept beside the mailbox file, built in the
+            // background (R6.2).
+            session.index_words = true;
             // A run that keeps its mailbox and its settings keeps downloaded pictures too.
             let kept_pictures = if kept && !sample && prefs_enabled() { keep_pictures() } else { None };
             let mut app = MailApp::new(session, services(file_dialog, cc.egui_ctx.clone(), kept_pictures));
@@ -1007,7 +1272,9 @@ fn main() -> eframe::Result {
             if let Some(path) = &app.session.path {
                 app.services.saver = background_saver(&cc.egui_ctx, path);
             }
-            if unavailable > 0 {
+            if damaged {
+                app.status(mailcraft_ui_egui::damaged_mailbox_notice());
+            } else if unavailable > 0 {
                 app.status(format!("{unavailable} bodies or attachments are missing from the mailbox's content folder, or damaged."));
             }
             // A mailbox whose Outlook Favorites were read another way than Microsoft Graph, which
@@ -1016,8 +1283,18 @@ fn main() -> eframe::Result {
                 app.session.mailbox_changed();
                 app.status(mailcraft_ui_egui::favorites_sync::FAVORITES_NOW_GRAPH);
             }
+            // Mail of Microsoft accounts kept with characters that couldn't be read (fetched
+            // before their character sets were) is fetched again, once (#185).
+            let again = mailcraft_engine::cmd::graph_down::refetch_unreadable(&mut app.session.mailbox);
+            if again > 0 {
+                app.session.mailbox_changed();
+                app.status(format!("{again} messages with characters that couldn't be read are being downloaded again."));
+            }
             // An ordinary start on a mailbox nobody has set up yet begins with adding an account.
             app.offer_setup = kept && !sample;
+            // A Microsoft account still on IMAP is offered the switch to Graph (R3.7): only for a
+            // mailbox kept in a file, which is where the copy from before the switch goes.
+            app.offer_graph_switch = kept && !sample;
             load_prefs(&mut app);
             app.ui.window = restored;
             app.integrated_titlebar = cfg!(target_os = "macos");
@@ -1034,6 +1311,12 @@ fn main() -> eframe::Result {
             if let Some(guard) = &guard {
                 guard.wake(&cc.egui_ctx);
             }
+            // macOS: an app menu whose Quit (⌘Q) asks the window to close, so a message being
+            // written is asked about first (winit's own quits without asking). Here, after winit
+            // has built its menu. Elsewhere it does nothing.
+            if let Err(e) = craft_quit::install_app_menu(&cc.egui_ctx, "MailCraft") {
+                log::warn!("the app menu couldn't be set up, so Quit won't ask about unsaved work: {e}");
+            }
             Ok(Box::new(App(
                 app,
                 restored,
@@ -1045,4 +1328,28 @@ fn main() -> eframe::Result {
             )))
         }),
     )
+}
+
+#[cfg(test)]
+mod prefs_tests {
+    use super::*;
+
+    #[test]
+    fn prefs_written_whole_and_a_damaged_file_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("mailcraft-prefs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("ui.json");
+        let ui = UiState::default();
+        write_prefs(&path, &ui).unwrap();
+        let back = read_prefs(&path).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), serde_json::to_value(&ui).unwrap());
+        // Nothing left beside it but the file itself.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+
+        std::fs::write(&path, b"{\"theme\": ").unwrap();
+        assert!(read_prefs(&path).is_none());
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(dir.join("ui.json.damaged")).unwrap(), b"{\"theme\": ");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

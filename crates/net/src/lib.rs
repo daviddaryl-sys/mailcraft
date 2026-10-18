@@ -49,6 +49,8 @@ mod send;
 mod sync;
 #[cfg(not(target_arch = "wasm32"))]
 mod transport;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod update;
 
 // (`cfg(test)` on its own line: that is how clippy knows test code, which may unwrap.)
 #[cfg(test)]
@@ -102,6 +104,10 @@ mod native {
         /// seconds the service asked to be left alone for, when it said.
         #[error("{text}")]
         Busy { text: String, retry_after: Option<u32> },
+        /// A shared mailbox Microsoft won't open for the owner of the token (#70), by Graph's own
+        /// code: asking again by itself changes nothing.
+        #[error("{}", .0.said())]
+        SharedRefused(mailcraft_model::sync::SharedRefusal),
     }
 
     impl NetError {
@@ -122,7 +128,7 @@ mod native {
                 NetError::ConsentNeeded(text) => NetError::ConsentNeeded(clean(text)),
                 NetError::Forbidden(text) => NetError::Forbidden(clean(text)),
                 NetError::Busy { text, retry_after } => NetError::Busy { text: clean(text), retry_after },
-                unworded @ (NetError::SignInCancelled | NetError::SignInTimedOut) => unworded,
+                unworded @ (NetError::SignInCancelled | NetError::SignInTimedOut | NetError::SharedRefused(_)) => unworded,
             }
         }
 

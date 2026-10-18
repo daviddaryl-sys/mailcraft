@@ -19,7 +19,7 @@ use parse::{Piece, Status, StatusLine, Value};
 pub use utf7::{decode_utf7, encode_utf7};
 
 use crate::line::Wire;
-use crate::{MAX_LINE, MAX_LITERAL, ProtoError, Secrets, tidy, xoauth2};
+use crate::{MAX_LINE, MAX_LITERAL, ProtoError, Secrets, for_trace, tidy, xoauth2};
 
 /// Most responses the server may send to one command.
 const MAX_RESPONSES: usize = 1_000_000;
@@ -789,7 +789,7 @@ impl<S: Read + Write> Imap<S> {
         }
         let tag = self.tag();
         if log::log_enabled!(log::Level::Trace) {
-            log::trace!("C: {tag} {}", self.secrets.hide(&command.for_log()));
+            log::trace!("C: {tag} {}", for_trace(&self.secrets.hide(&command.for_log())));
         }
         let mut out = Vec::with_capacity(128);
         out.extend_from_slice(tag.as_bytes());
@@ -854,7 +854,7 @@ impl<S: Read + Write> Imap<S> {
     fn read_response(&mut self) -> Result<Response, ProtoError> {
         let line = self.wire.read_line()?;
         if log::log_enabled!(log::Level::Trace) {
-            log::trace!("S: {}", self.secrets.hide(&String::from_utf8_lossy(&line)));
+            log::trace!("S: {}", for_trace(&self.secrets.hide(&String::from_utf8_lossy(&line))));
         }
         if line.first() == Some(&b'+') {
             return Ok(Response::GoAhead);

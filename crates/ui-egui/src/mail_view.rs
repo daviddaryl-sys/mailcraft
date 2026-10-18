@@ -14,6 +14,8 @@ use serde_json::json;
 use crate::theme::{Tokens, paint_clipped, regular, semibold};
 use crate::{MailApp, icons};
 
+mod server_rows;
+
 /// What a drag out of the message list carries: the messages to file in the folder they are
 /// let go over (`nav::folder_row` takes them).
 pub(crate) struct MessageDrag(pub Vec<Id>);
@@ -56,6 +58,10 @@ const TIME_RIGHT: f32 = 24.0;
 /// Sender, subject and preview end this far from a row's right end, where the time's column
 /// starts: every row's text stops at the same place, whatever its time.
 const TEXT_RIGHT: f32 = 98.0;
+/// Where a quick action (delete, flag) on the row under the pointer takes a click.
+const QUICK_TARGET: egui::Vec2 = egui::vec2(28.0, 22.0);
+/// The clear space between the quick actions, and between them and the marks before them.
+const QUICK_GAP: f32 = 6.0;
 /// The middle of the sender's capitals, from a row's top: they stand 15 below the line above.
 const SENDER_Y: f32 = 21.0;
 /// The middle of the subject's (and the time's) capitals, from a row's top.
@@ -359,14 +365,103 @@ fn scroll_arrows(app: &mut MailApp, ui: &mut Ui, lane: Rect, out: &egui::scroll_
     }
 }
 
+/// While a search is on, a bar over the list says so: how many it found and where, with a way
+/// back to the folder (✕, or Esc). Search is quick enough that the list changing by itself
+/// went unnoticed (#115).
+fn search_bar(app: &mut MailApp, ui: &mut Ui, found: usize) {
+    let on = !app.session.view.search.trim().is_empty();
+    // It fades in when a search starts; with no search it is gone at once, ready to fade again.
+    let shown = ui.ctx().animate_bool_with_time(ui.id().with("search_bar_fade"), on, if on { 0.15 } else { 0.0 });
+    if !on {
+        return;
+    }
+    let t = Tokens::get(ui.ctx());
+    let scope = if app.session.view.scope == mailcraft_engine::Scope::Everywhere {
+        tl!("All Mailboxes").to_string()
+    } else {
+        // (A shared mailbox's folder with the mailbox it is in, #70.)
+        app.session.mailbox.folder(app.session.view.folder).map(|f| crate::nav::folder_label(&app.session.mailbox, f)).unwrap_or_default()
+    };
+    let said = match found {
+        0 => crate::i18n::fmt(tl!("No results in {scope}"), &[("scope", &scope)]),
+        1 => crate::i18n::fmt(tl!("1 result in {scope}"), &[("scope", &scope)]),
+        n => crate::i18n::fmt(tl!("{n} results in {scope}"), &[("n", &n.to_string()), ("scope", &scope)]),
+    };
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width() - SCROLL_LANE, 30.0), Sense::hover());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &said));
+    let fill = t.selection.gamma_multiply(shown);
+    ui.painter().rect_filled(r.shrink2(vec2(6.0, 3.0)), 4.0, fill);
+    let close = Rect::from_center_size(pos2(r.max.x - 22.0, r.center().y), vec2(22.0, 22.0));
+    crate::theme::paint_clipped(ui.painter(), pos2(r.min.x + 16.0, r.center().y), close.min.x - r.min.x - 24.0, &said, semibold(12.0), t.text);
+    let x = ui.interact(close, ui.id().with("search_bar_close"), Sense::click()).on_hover_text(tl!("Clear search (Esc)"));
+    x.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!("Clear search")));
+    app.hit.add("searchBarClose", 0, close);
+    if x.hovered() {
+        ui.painter().rect_filled(close, 4.0, t.hover);
+    }
+    let ink = if x.hovered() { t.text } else { t.text_dim };
+    let c = close.center();
+    for (a, b) in [(vec2(-4.5, -4.5), vec2(4.5, 4.5)), (vec2(-4.5, 4.5), vec2(4.5, -4.5))] {
+        ui.painter().line_segment([c + a, c + b], Stroke::new(1.4, ink));
+    }
+    if x.clicked() {
+        app.search_text.clear();
+        let _ = app.run("view.clearSearch", json!({}));
+    }
+}
+
 fn list(app: &mut MailApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
     list_header(app, ui);
     let rows = app.session.rows();
+    search_bar(app, ui, rows.len());
+    // A search covers what is here: of a message not fetched yet, its headers and preview (R3.2).
+    if !app.session.view.search.trim().is_empty() {
+        let folder = app.session.view.folder;
+        let everywhere = app.session.view.scope == mailcraft_engine::Scope::Everywhere;
+        let partly = app.session.mailbox.messages.values().filter(|m| m.unfetched && (everywhere || m.folder == folder)).count();
+        if partly > 0 {
+            let said = crate::i18n::fmt(
+                tl!("{count} messages weren't searched in full: only their beginning is here until they download."),
+                &[("count", &partly.to_string())],
+            );
+            egui::Frame::NONE.inner_margin(egui::Margin { left: 12, right: 12, top: 4, bottom: 4 }).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(egui::RichText::new(said).font(regular(11.5)).color(t.text_dim));
+            });
+        }
+    }
+    // While the word index is being built, what it hasn't got yet is searched more slowly (R6.2).
+    if !app.session.view.search.trim().is_empty() && matches!(app.session.word_index(), mailcraft_engine::WordIndex::Building { .. }) {
+        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
+        ui.painter().rect_filled(r, 0.0, t.panel);
+        let text = tl!("Still indexing: some older mail is searched more slowly");
+        paint_clipped(ui.painter(), pos2(r.min.x + 10.0, r.min.y + 4.0), r.width() - 20.0, text, regular(11.5), t.text_dim);
+        app.hit.add("stillIndexing", 0, r);
+    }
+    // A search that reads the text of messages goes as far into older mail as its time allows,
+    // and says how far that was.
+    if app.session.unsearched > 0 && !app.session.view.search.trim().is_empty() {
+        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
+        ui.painter().rect_filled(r, 0.0, t.panel);
+        let n = app.session.unsearched;
+        let text = if n == 1 {
+            tl!("1 older message wasn't searched: its text isn't loaded yet").to_string()
+        } else {
+            crate::i18n::fmt(tl!("{n} older messages weren't searched: their text isn't loaded yet"), &[("n", &n.to_string())])
+        };
+        paint_clipped(ui.painter(), pos2(r.min.x + 10.0, r.min.y + 4.0), r.width() - 20.0, &text, regular(11.5), t.text_dim);
+    }
+    let row_h = row_height(app.session.prefs.preview_lines);
+    // Below the local results of a search: More results on the server, and what came (R6.2).
+    let searching = !app.session.view.search.trim().is_empty();
+    let local: std::collections::HashSet<Id> =
+        if searching { rows.iter().flat_map(|r| r.members.iter().copied()).collect() } else { Default::default() };
+    let below = if searching { server_rows::height(app, &local, row_h) } else { 0.0 };
     if rows.is_empty() {
         let r = ui.available_rect_before_wrap();
-        let msg = if !app.session.view.search.trim().is_empty() {
+        let msg = if searching {
             tl!("Nothing matches the search.")
         } else if app.session.view.filter != Filter::All {
             tl!("Nothing matches this filter.")
@@ -374,9 +469,18 @@ fn list(app: &mut MailApp, ui: &mut Ui) {
             tl!("Nothing here yet.")
         };
         ui.painter().text(pos2(r.center().x, r.min.y + 60.0), Align2::CENTER_CENTER, msg, regular(12.5), t.text_dim);
+        if below > 0.0 {
+            let room = Rect::from_min_max(pos2(r.min.x, r.min.y + 90.0), r.max);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(room), |ui| {
+                egui::ScrollArea::vertical().id_salt("message_list_server").auto_shrink([false, false]).show_viewport(ui, |ui, viewport| {
+                    let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), below), Sense::hover());
+                    let width = (area.width() - SCROLL_LANE).max(0.0);
+                    server_rows::show(app, ui, &local, area.min.x, area.min.y, width, row_h, viewport.translate(area.min.to_vec2()));
+                });
+            });
+        }
         return;
     }
-    let row_h = row_height(app.session.prefs.preview_lines);
     // Where each row starts: rows are the same height, group headings add theirs.
     let mut tops = Vec::with_capacity(rows.len());
     let mut y = 0.0f32;
@@ -387,7 +491,8 @@ fn list(app: &mut MailApp, ui: &mut Ui) {
         tops.push(y);
         y += row_h;
     }
-    let total = y;
+    let rows_end = y;
+    let total = y + below;
     let reveal = std::mem::take(&mut app.reveal_selection);
     let focus = app.session.sel.focus();
     let outer = ui.available_rect_before_wrap();
@@ -439,6 +544,9 @@ fn list(app: &mut MailApp, ui: &mut Ui) {
                     ui.scroll_to_rect(rect, None);
                 }
                 message_row(app, ui, row, rect);
+            }
+            if below > 0.0 {
+                server_rows::show(app, ui, &local, origin.x, origin.y + rows_end, width, row_h, viewport.translate(origin.to_vec2()));
             }
         });
     if arrows {
@@ -505,6 +613,37 @@ fn dotted_frame(p: &egui::Painter, r: Rect, color: Color32) {
     p.add(egui::Shape::mesh(dots));
 }
 
+/// Where a message's follow-up flag stands, as its row in the list shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FollowUp {
+    /// Not flagged, or the flag is done with: the row is as any other.
+    None,
+    /// Flagged: the row wears a faint tint.
+    Flagged,
+    /// Flagged, and due on a day before today: its text is red as well.
+    Overdue,
+}
+
+impl FollowUp {
+    pub(crate) fn of(m: &mailcraft_model::Message, session: &mailcraft_engine::Session) -> FollowUp {
+        match (m.flag, m.flag_due) {
+            (FlagStatus::Flagged, Some(due)) if session.local(due).date < session.today() => FollowUp::Overdue,
+            (FlagStatus::Flagged, _) => FollowUp::Flagged,
+            (FlagStatus::Complete | FlagStatus::None, _) => FollowUp::None,
+        }
+    }
+}
+
+/// What a row is filled with, under the pointer's shade: a selected row's colour, a flagged
+/// one's tint, or nothing (the list shows through).
+pub(crate) fn row_fill(t: &Tokens, follow_up: FollowUp, selected: bool, focus: bool) -> Option<Color32> {
+    match (selected, follow_up) {
+        (true, _) => Some(if focus { t.selection } else { t.selection.linear_multiply(0.7) }),
+        (false, FollowUp::Flagged | FollowUp::Overdue) => Some(t.flagged_row),
+        (false, FollowUp::None) => None,
+    }
+}
+
 /// One message in the list: the sender in the larger size, the subject with the time at the end
 /// of its line, then the preview in the dimmer colour; marks at the right of the sender's line,
 /// category marks and the size of a conversation at the right of the preview's.
@@ -529,8 +668,10 @@ fn message_row(app: &mut MailApp, ui: &mut Ui, row: &Row, rect: Rect) {
     // a flagged message wears its flag) and delete. Like the read switch they sit on top of the
     // row and leave the selection alone.
     let over = ui.rect_contains_pointer(rect) && egui::DragAndDrop::payload::<MessageDrag>(ui.ctx()).is_none();
-    let flag_rect = Rect::from_center_size(pos2(rect.max.x - TIME_RIGHT / 2.0, line1), vec2(20.0, 20.0));
-    let delete_rect = flag_rect.translate(vec2(-22.0, 0.0));
+    // Wide enough to hit without aiming, a gap between them, and short enough to stay off the
+    // time on the subject's line.
+    let flag_rect = Rect::from_center_size(pos2(rect.max.x - QUICK_TARGET.x / 2.0, line1), QUICK_TARGET);
+    let delete_rect = flag_rect.translate(vec2(-(QUICK_TARGET.x + QUICK_GAP), 0.0));
     let flagged = m.flag == FlagStatus::Flagged;
     let quick = over.then(|| {
         let delete = ui.interact(delete_rect, ui.id().with(("msg_delete", row.id)), Sense::click()).on_hover_text(tl!("Delete"));
@@ -548,10 +689,22 @@ fn message_row(app: &mut MailApp, ui: &mut Ui, row: &Row, rect: Rect) {
     let p = ui.painter();
     // The row is what is above the line under it; its content starts a little in from the list's edge.
     let body = Rect::from_min_max(pos2(rect.min.x + ROW_INSET, rect.min.y), pos2(rect.max.x, rect.max.y - 1.0));
-    if selected {
-        p.rect_filled(body, 0.0, if focus { t.selection } else { t.selection.linear_multiply(0.7) });
-    } else if resp.hovered() || read_resp.hovered() || quick.is_some() {
+    let follow_up = FollowUp::of(&m, &app.session);
+    let fill = row_fill(&t, follow_up, selected, focus);
+    if let Some(fill) = fill {
+        p.rect_filled(body, 0.0, fill);
+        if fill == t.flagged_row {
+            app.hit.add("messageFlagShade", row.id, body);
+        }
+    }
+    if !selected && (resp.hovered() || read_resp.hovered() || quick.is_some()) {
+        // The pointer's shade goes over a flagged row's tint.
         p.rect_filled(body, 0.0, t.hover.linear_multiply(0.6));
+    }
+    // Past its due date, its text is red.
+    let overdue = follow_up == FollowUp::Overdue;
+    if overdue {
+        app.hit.add("messageOverdue", row.id, body);
     }
     // Unread wears the bar; under the pointer it widens, and a read message shows a faint one
     // so the switch can be found.
@@ -591,9 +744,10 @@ fn message_row(app: &mut MailApp, ui: &mut Ui, row: &Row, rect: Rect) {
             if resp.hovered() {
                 p.rect_filled(at, 4.0, t.pressed);
             }
-            icons::paint(p, at.shrink(3.0), icon, color, t.accent);
+            icons::paint(p, Rect::from_center_size(at.center(), vec2(14.0, 14.0)), icon, color, t.accent);
         }
-        x = delete_rect.min.x - 2.0;
+        // The marks keep clear of delete, so a click meant for the row doesn't land on it.
+        x = delete_rect.min.x - QUICK_GAP;
     } else {
         let flag = Rect::from_center_size(flag_rect.center(), vec2(12.0, 12.0));
         match m.flag {
@@ -634,12 +788,16 @@ fn message_row(app: &mut MailApp, ui: &mut Ui, row: &Row, rect: Rect) {
         let w = paint_clipped(p, pos2(left, line1), (who_end - left).max(0.0), tl!("[Draft]"), regular(SENDER_TEXT), t.red);
         who_x += w + 5.0;
     }
-    paint_clipped(p, pos2(who_x, line1), (who_end - who_x).max(0.0), &who, who_font, t.text);
+    paint_clipped(p, pos2(who_x, line1), (who_end - who_x).max(0.0), &who, who_font, if overdue { t.overdue } else { t.text });
 
     // The subject's line, with the time at its end.
     let date =
         mailcraft_time::list_label(mailcraft_engine::list::when(&m), app.session.now(), app.session.offset_at(m.date), app.session.prefs.twelve_hour);
-    let (date_font, date_color) = if unread { (semibold(LIST_TEXT), t.accent_text) } else { (regular(LIST_TEXT), t.text) };
+    let (date_font, date_color) = match (unread, overdue) {
+        (true, false) => (semibold(LIST_TEXT), t.accent_text),
+        (true, true) => (semibold(LIST_TEXT), t.overdue),
+        (false, _) => (regular(LIST_TEXT), if overdue { t.overdue } else { t.text }),
+    };
     let date_w = p.text(pos2(time_end, line2), Align2::RIGHT_CENTER, &date, date_font, date_color).width();
     let mut subject_end = text_end.min(time_end - date_w - 8.0);
 
@@ -665,7 +823,11 @@ fn message_row(app: &mut MailApp, ui: &mut Ui, row: &Row, rect: Rect) {
         subject_end = subject_end.min(sx - 6.0);
     }
     let subject = if m.subject.trim().is_empty() { tl!("(no subject)") } else { m.subject.as_str() };
-    let (sfont, scolor) = if unread { (semibold(LIST_TEXT), t.accent_text) } else { (regular(LIST_TEXT), t.text) };
+    let (sfont, scolor) = match (unread, overdue) {
+        (true, false) => (semibold(LIST_TEXT), t.accent_text),
+        (true, true) => (semibold(LIST_TEXT), t.overdue),
+        (false, _) => (regular(LIST_TEXT), if overdue { t.overdue } else { t.text }),
+    };
     paint_clipped(p, pos2(left, line2), (subject_end - left).max(0.0), subject, sfont, scolor);
 
     // Then the preview: whole words, as many lines as asked for, and no mark where it stops.
@@ -946,9 +1108,14 @@ mod tests {
         hover(&mut harness, rect.center());
         let (flag, delete) = (at(&harness, "messageFlag", row.id), at(&harness, "messageDelete", row.id));
         // The flag is in its own column at the row's end, delete before it, both on the sender's line.
-        assert!(flag.center().distance(pos2(rect.max.x - TIME_RIGHT / 2.0, rect.min.y + SENDER_Y)) < 0.01);
+        assert!(flag.max.x <= rect.max.x && (flag.center().y - (rect.min.y + SENDER_Y)).abs() < 0.01);
         assert_eq!(delete.center().y, flag.center().y);
         assert!(delete.max.x <= flag.min.x && delete.min.x > rect.max.x - TEXT_RIGHT, "the buttons keep out of the text's column");
+        // Big enough to hit without aiming, and apart, so a click meant for one doesn't take the other.
+        for b in [flag, delete] {
+            assert!(b.width() >= 28.0 && b.height() >= 22.0, "{b:?}");
+        }
+        assert!(flag.min.x - delete.max.x >= 6.0);
         assert!(flag.max.y < rect.min.y + SUBJECT_Y - 4.0, "and off the subject's line, where the time is");
 
         // They do what they say, and the selection stays where it was.
@@ -1180,5 +1347,42 @@ mod tests {
             let changed = Arc::new(Message { body: Body { text: "Other words".into(), html: None }, ..(**first).clone() });
             assert_eq!(&*preview(ui, 8, &changed, 40), "Other words");
         });
+    }
+
+    /// A flagged message's row wears a faint tint, as in Outlook; one whose follow-up was due on
+    /// a day before today has red text as well. A completed flag wears neither, and a selected
+    /// row is the selection's colour whatever its flag.
+    #[test]
+    fn flagged_rows_are_tinted_and_overdue_ones_red() {
+        let mut a = app();
+        let ids: Vec<Id> = a.session.rows().iter().take(5).map(|r| r.id).collect();
+        a.execute("mail.clearFlag", json!({"ids": ids})).unwrap();
+        a.execute("mail.flag", json!({"ids": [ids[0]], "due": "2026-10-09"})).unwrap();
+        a.execute("mail.flag", json!({"ids": [ids[1]], "due": "2026-10-14"})).unwrap();
+        a.execute("mail.flag", json!({"ids": [ids[2]]})).unwrap();
+        a.execute("mail.flag", json!({"ids": [ids[3]], "due": "2026-10-01"})).unwrap();
+        a.execute("mail.complete", json!({"ids": [ids[3]]})).unwrap();
+        let follow_ups: Vec<FollowUp> = ids.iter().map(|id| FollowUp::of(&a.session.mailbox.messages[id], &a.session)).collect();
+        assert_eq!(follow_ups, [FollowUp::Overdue, FollowUp::Flagged, FollowUp::Flagged, FollowUp::None, FollowUp::None], "due today is not overdue");
+        a.execute("mail.select", json!({"id": ids[4]})).unwrap();
+        let mut harness = window(a, (1440.0, 900.0));
+        harness.run_steps(3);
+        let look = |harness: &Window, id: Id| {
+            let hit = &harness.state().hit;
+            (hit.rect("messageFlagShade", id).is_some(), hit.rect("messageOverdue", id).is_some())
+        };
+        let looks: Vec<(bool, bool)> = ids.iter().map(|id| look(&harness, *id)).collect();
+        assert_eq!(looks, [(true, true), (true, false), (true, false), (false, false), (false, false)]);
+        // Selected, the row is the selection's colour (its text stays red when it is overdue).
+        harness.state_mut().execute("mail.select", json!({"id": ids[0]})).unwrap();
+        harness.run_steps(3);
+        assert_eq!(look(&harness, ids[0]), (false, true));
+        // The tint is neither the list, the selection nor the pointer's shade, in either palette.
+        for t in [Tokens::light(), Tokens::dark()] {
+            assert_eq!(row_fill(&t, FollowUp::Flagged, false, false), Some(t.flagged_row));
+            assert_eq!(row_fill(&t, FollowUp::Overdue, true, true), Some(t.selection));
+            assert_eq!(row_fill(&t, FollowUp::None, false, false), None);
+            assert!(![t.surface, t.selection, t.hover].contains(&t.flagged_row));
+        }
     }
 }

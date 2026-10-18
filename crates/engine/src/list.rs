@@ -61,21 +61,38 @@ fn group_label(s: &Session, m: &Message) -> Option<String> {
 }
 
 pub fn rows(s: &Session) -> Vec<Row> {
+    rows_with(s, &HashMap::new(), &HashMap::new())
+}
+
+/// Which messages the list looks at: those of the folder in view, or, for a search of every
+/// mailbox, every message but those in Deleted Items, Junk E-mail and their subfolders.
+pub(crate) fn in_view(s: &Session) -> impl Fn(&Message) -> bool + '_ {
     let mb = &s.mailbox;
-    let query = Query::parse(&s.view.search);
-    let everywhere = !query.is_empty() && s.view.scope == Scope::Everywhere;
+    let everywhere = !Query::parse(&s.view.search).is_empty() && s.view.scope == Scope::Everywhere;
     // Deleted and junk mail stays out of a search of everything.
-    let hidden: Vec<Id> = if everywhere {
+    let hidden: std::collections::HashSet<Id> = if everywhere {
         mb.folders.iter().filter(|f| matches!(f.kind, FolderKind::Deleted | FolderKind::Junk)).flat_map(|f| mb.subtree(f.id)).collect()
     } else {
-        Vec::new()
+        Default::default()
     };
+    let folder = s.view.folder;
+    move |m: &Message| if everywhere { !hidden.contains(&m.folder) } else { m.folder == folder }
+}
+
+/// [`rows`], for a search answered in part already: `decided` says whether each message the word
+/// index answered for matches (`Session::search_words`), and `searched` whether each whose body
+/// was brought in and let go of again while the search ran did (`Session::load_bodies_for_search`),
+/// which a body named only can no longer say.
+pub fn rows_with(s: &Session, decided: &HashMap<Id, bool>, searched: &HashMap<Id, bool>) -> Vec<Row> {
+    let mb = &s.mailbox;
+    let query = Query::parse(&s.view.search);
+    let in_view = in_view(s);
     let me: Vec<&str> = mb.accounts.iter().map(|a| a.email.as_str()).filter(|e| !e.is_empty()).collect();
     let mut shown: Vec<&Message> = mb
         .messages
         .values()
         .map(|m| m.as_ref())
-        .filter(|m| if everywhere { !hidden.contains(&m.folder) } else { m.folder == s.view.folder })
+        .filter(|m| in_view(m))
         .filter(|m| match s.view.filter {
             Filter::All => true,
             Filter::Unread => !m.read,
@@ -83,7 +100,13 @@ pub fn rows(s: &Session) -> Vec<Row> {
             Filter::Attachments => m.has_attachments(),
             Filter::ToMe => m.to.iter().any(|a| me.iter().any(|e| a.email.eq_ignore_ascii_case(e))),
         })
-        .filter(|m| query.is_empty() || query.matches(m, s.offset_at(m.date)))
+        .filter(|m| {
+            query.is_empty()
+                || match decided.get(&m.id).or_else(|| searched.get(&m.id).filter(|_| m.body_is_kept())) {
+                    Some(hit) => *hit,
+                    None => query.matches(m, s.offset_at(m.date)),
+                }
+        })
         .collect();
 
     let desc = s.view.sort_descending;

@@ -34,6 +34,16 @@ pub enum Dialog {
         text: String,
         error: String,
     },
+    /// The address of a shared mailbox to open under a Microsoft account (#70): it only collects
+    /// the address, then runs `account.addSharedMailbox`.
+    SharedMailbox {
+        account: Id,
+        address: String,
+        error: String,
+        /// The shared mailbox added for this address, while its Inbox is being read (S1): it is
+        /// kept when that works, and removed again when it doesn't.
+        checking: Option<Id>,
+    },
     /// Where the selected text of the message being written leads (Ctrl+K).
     Link {
         url: String,
@@ -50,13 +60,18 @@ pub enum Dialog {
     DiscardDraft {
         then: String,
     },
-    /// Lines to read and copy: what went wrong in the last Send/Receive (`syncProblems`), what
-    /// a check of the calendar connection came to (`calendarCheck`).
+    /// Lines to read and copy: what a check of the calendar connection came to
+    /// (`calendarCheck`). (What went wrong in a Send/Receive is in Send/Receive Progress.)
     Report {
         /// What `ui.inspect` calls it.
         name: &'static str,
         title: String,
         lines: Vec<String>,
+    },
+    /// What the owner has just done by hand was refused at once, and why (#152): a message box
+    /// with OK, as Outlook's. Never opened for the control channel, an agent or the background.
+    Refused {
+        text: String,
     },
     /// Something that can't be taken back is about to happen, and the owner is asked first.
     Confirm {
@@ -64,10 +79,24 @@ pub enum Dialog {
         params: Value,
         ask: Question,
     },
-    About,
+    /// About MailCraft, on one of its tabs: [`AboutTab`].
+    About(AboutTab),
+    /// The page that offers a Microsoft account kept in step by IMAP the switch to Microsoft
+    /// Graph ([`crate::graph_switch`]).
+    GraphSwitch {
+        account: Id,
+    },
     Form(Form),
     /// Propose New Time, Forward, or the list of what was proposed ([`crate::meeting_dialogs`]).
     Meeting(crate::meeting_dialogs::MeetingDialog),
+}
+
+/// The tabs of About: the program, and the people who made it ([`crate::credits`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AboutTab {
+    #[default]
+    About,
+    Contributors,
 }
 
 /// What a [`Dialog::Confirm`] asks.
@@ -112,12 +141,16 @@ impl Dialog {
             Dialog::Commands { .. } => "commands",
             Dialog::Folder { .. } => "folder",
             Dialog::GoToDate { .. } => "goToDate",
+            Dialog::SharedMailbox { .. } => "sharedMailbox",
             Dialog::Link { .. } => "link",
             Dialog::Password { .. } => "password",
             Dialog::DiscardDraft { .. } => "discardDraft",
             Dialog::Confirm { .. } => "confirm",
             Dialog::Report { name, .. } => name,
-            Dialog::About => "about",
+            Dialog::Refused { .. } => "refused",
+            Dialog::About(AboutTab::About) => "about",
+            Dialog::About(AboutTab::Contributors) => "contributors",
+            Dialog::GraphSwitch { .. } => "graphSwitch",
             Dialog::Form(f) => f.name(),
             Dialog::Meeting(d) => d.name(),
         }
@@ -144,6 +177,20 @@ impl Dialog {
                 }
             }
             "goToDate" => Dialog::GoToDate { text: app.session.view.date.iso(), error: String::new() },
+            "sharedMailbox" => {
+                // Under the account named, else the first that can open one; only while shared
+                // mailboxes are being tested.
+                if !app.session.shared_mailboxes {
+                    return None;
+                }
+                let can = |a: &&mailcraft_model::Account| crate::shared_mailboxes::can_open_shared(a);
+                let mailbox = &app.session.mailbox;
+                let account = match id("account") {
+                    Some(id) => mailbox.account(id).filter(can)?.id,
+                    None => mailbox.accounts.iter().find(can)?.id,
+                };
+                Dialog::SharedMailbox { account, address: String::new(), error: String::new(), checking: None }
+            }
             "link" => {
                 let c = app.session.compose.as_ref().filter(|c| c.format == mailcraft_engine::BodyFormat::Html)?;
                 let sel = c.body.selection();
@@ -153,14 +200,9 @@ impl Dialog {
             }
             "password" => Dialog::Password { account: id("account")?, password: String::new() },
             "discardDraft" => Dialog::DiscardDraft { then: params.get("then").and_then(Value::as_str).unwrap_or("").to_string() },
-            "about" => Dialog::About,
-            "syncProblems" => {
-                let lines = app.sync_problem_lines();
-                if lines.is_empty() {
-                    return None;
-                }
-                Dialog::Report { name: "syncProblems", title: tl!("Send/Receive Problems").to_string(), lines }
-            }
+            "about" if params.get("tab").and_then(Value::as_str) == Some("contributors") => Dialog::About(AboutTab::Contributors),
+            "about" => Dialog::About(AboutTab::About),
+            "contributors" => Dialog::About(AboutTab::Contributors),
             // An item that repeats is asked about before it opens: just this one, or the series?
             "editEvent" if opening_question(app, params).is_some() => {
                 Dialog::Confirm { command: "calendar.edit".to_string(), params: json!({}), ask: opening_question(app, params)? }
@@ -180,8 +222,8 @@ pub(crate) fn open_dialog(app: &mut MailApp, name: &str, params: &Value) -> Opti
 }
 
 /// What to ask before a user-run command that can't be taken back: deleting for good (also on
-/// the mail server, for an account that has one), emptying or deleting a folder, removing an
-/// account. `None` for everything else. Scripts and agents are not asked: they said what they meant.
+/// the mail server, for an account that has one), deleting a contact, emptying or deleting a
+/// folder, removing an account. `None` for everything else. Scripts and agents are not asked: they said what they meant.
 pub fn confirmation(app: &MailApp, id: &str, params: &Value) -> Option<Question> {
     let mb = &app.session.mailbox;
     let folder = |key: &str| params.get(key).and_then(Value::as_u64).or(Some(app.session.view.folder)).and_then(|f| mb.folder(f));
@@ -189,6 +231,11 @@ pub fn confirmation(app: &MailApp, id: &str, params: &Value) -> Option<Question>
     let server_too = |yes: bool| if yes { format!(" {}", tl!("They are removed from the mail server too.")) } else { String::new() };
     let question = |title: &str, text: String, action: &str| Some(Question::new(title, text, action, Value::Null));
     match id {
+        // An Office file with macros, or a web page, from a message (#126).
+        "mail.openAttachment" => {
+            let (title, text, action) = crate::attachment_open::question(app, params)?;
+            question(&title, text, &action)
+        }
         "mail.delete" | "mail.deletePermanently" => {
             let ids: Vec<u64> = match params.get("ids").and_then(Value::as_array) {
                 Some(ids) => ids.iter().filter_map(Value::as_u64).collect(),
@@ -221,6 +268,22 @@ pub fn confirmation(app: &MailApp, id: &str, params: &Value) -> Option<Question>
             };
             question(tl!("Delete for Good"), text, tl!("Delete"))
         }
+        // A contact has no Deleted Items to go to: deleting one is for good (#186). One the
+        // account's server keeps can't be deleted here, and the command says so without asking.
+        "people.delete" => {
+            let c = mb.contact(params.get("id").and_then(Value::as_u64).or(app.session.sel.contact)?)?;
+            if mailcraft_engine::cmd::remote::keeper(mb, &c.origin).is_some() {
+                return None;
+            }
+            let name = c.name();
+            let name = name.trim();
+            let what = if name.is_empty() {
+                tl!("This contact will be deleted for good.").to_string()
+            } else {
+                crate::i18n::fmt(tl!("\"{name}\" will be deleted for good."), &[("name", name)])
+            };
+            question(tl!("Delete Contact"), format!("{what} {}", tl!("Contacts don't go to Deleted Items.")), tl!("Delete"))
+        }
         "folder.empty" => {
             let f = folder("id")?;
             if mb.count(f.id) == 0 {
@@ -242,7 +305,35 @@ pub fn confirmation(app: &MailApp, id: &str, params: &Value) -> Option<Question>
                 tl!("and the mail kept for it on this device will be removed."),
                 tl!("Mail on the server is not touched.")
             );
+            // (The shared mailboxes opened through it go with it, #70.)
+            let shared = mb.shared_mailboxes(a.id).len();
+            let text = match shared {
+                0 => text,
+                1 => format!("{text} {}", tl!("The shared mailbox opened through it is removed from this device too.")),
+                n => format!(
+                    "{text} {}",
+                    crate::i18n::fmt(tl!("The {n} shared mailboxes opened through it are removed from this device too."), &[("n", &n.to_string())])
+                ),
+            };
             question(tl!("Remove Account"), text, tl!("Remove"))
+        }
+        // A shared mailbox is closed here only; what waits to go to it is named first (#70).
+        "account.removeSharedMailbox" => {
+            let a = mb.account(params.get("id").and_then(Value::as_u64)?).filter(|a| a.is_shared())?;
+            let waiting = app.waiting_to_go(a.id);
+            let text = crate::i18n::fmt(
+                tl!("{address} and the mail kept for it on this device will be removed. The shared mailbox on the server is not touched."),
+                &[("address", a.email.trim())],
+            );
+            let text = match waiting {
+                0 => text,
+                1 => format!("{text} {}", tl!("1 change made here hasn't reached the server and will be lost.")),
+                n => format!(
+                    "{text} {}",
+                    crate::i18n::fmt(tl!("{n} changes made here haven't reached the server and will be lost."), &[("n", &n.to_string())])
+                ),
+            };
+            question(tl!("Remove Shared Mailbox"), text, tl!("Remove"))
         }
         // A check on the account's real calendar says exactly what it is about to do there.
         "ui.checkCalendar" => {
@@ -346,10 +437,9 @@ pub(crate) fn go_ahead(app: &mut MailApp, command: &str, params: Value) {
         let day = params.get("occurrence").and_then(Value::as_str).and_then(mailcraft_time::Date::parse_iso).filter(|_| one);
         app.calendar.opened = params.get("scope").is_some().then_some((event, day));
     }
-    let said = app.status_msg.clone();
-    if app.run(command, params.clone()).is_err() && command == "ui.openWindow" {
+    let opened = if command == "ui.openWindow" { app.run_or_else(command, params.clone()) } else { app.run(command, params.clone()) };
+    if opened.is_err() && command == "ui.openWindow" {
         // No windows of their own here: the form, as a double click does without them.
-        app.status_msg = said;
         let which: serde_json::Map<String, Value> = params
             .as_object()
             .into_iter()
@@ -845,6 +935,59 @@ pub fn show(app: &mut MailApp, ctx: &egui::Context) {
                 }
             }
         }
+        Dialog::SharedMailbox { account, address, error, checking } => {
+            let mut submit = false;
+            let owner = app.session.mailbox.account(*account).map(|a| a.email.clone()).unwrap_or_default();
+            // (One that is being checked and is gone was answered: [`MailApp::finish_shared_check`].)
+            if checking.is_some_and(|id| !app.shared_checking.contains(&id)) {
+                *checking = None;
+            }
+            let open = window(ctx, tl!("Add Shared Mailbox"), 420.0, |ui| {
+                ui.label(tl!("The shared mailbox's e-mail address"));
+                let field = egui::TextEdit::singleline(address).hint_text("support@example.org").desired_width(f32::INFINITY);
+                let resp = ui.add_enabled(checking.is_none(), field);
+                if checking.is_none() && !resp.has_focus() && error.is_empty() {
+                    resp.request_focus();
+                }
+                ui.label(
+                    egui::RichText::new(crate::i18n::fmt(
+                        tl!("Opened with {owner}'s sign-in. It needs Full Access to the mailbox, which your organisation's administrator gives. Microsoft asks you once to let MailCraft read and change shared mailboxes. What you change in it goes to it. Mail you write in it is from its address, and sending as it needs Send As or Send on Behalf permission: Microsoft asks you once more at your first send."),
+                        &[("owner", &owner)],
+                    ))
+                    .color(t.text_dim)
+                    .size(11.0),
+                );
+                if checking.is_some() {
+                    ui.label(egui::RichText::new(tl!("Checking the address with Microsoft…")).color(t.text_dim));
+                }
+                if !error.is_empty() {
+                    ui.label(egui::RichText::new(error.as_str()).color(t.red));
+                }
+                let (ok, cancel) = buttons(ui, tl!("Add"), checking.is_none() && !address.trim().is_empty());
+                submit = checking.is_none() && (ok || enter);
+                close |= cancel;
+            });
+            close |= !open;
+            // Called off while it was being checked: it isn't kept.
+            if close && let Some(id) = checking.take() {
+                app.drop_shared_check(id);
+            }
+            if submit && !close {
+                error.clear();
+                match app.execute("account.addSharedMailbox", json!({"account": *account, "address": address.trim()})) {
+                    // Kept only once its Inbox has been read: that is also when the owner is asked
+                    // for the permission (S1).
+                    Ok(added) => match added.get("id").and_then(Value::as_u64) {
+                        Some(id) => match app.begin_shared_check(id) {
+                            Ok(()) => *checking = Some(id),
+                            Err(e) => *error = e,
+                        },
+                        None => *error = tl!("The shared mailbox couldn't be added").to_string(),
+                    },
+                    Err(e) => *error = e,
+                }
+            }
+        }
         Dialog::Link { url, error, linked } => {
             let (mut submit, mut remove) = (false, false);
             let open = window(ctx, tl!("Insert Link"), 420.0, |ui| {
@@ -932,6 +1075,27 @@ pub fn show(app: &mut MailApp, ctx: &egui::Context) {
             });
             close |= !open;
         }
+        Dialog::Refused { text } => {
+            let open = window(ctx, "MailCraft", 420.0, |ui| {
+                ui.horizontal_top(|ui| {
+                    // A warning mark drawn here: a round red dot with a white bar.
+                    let (mark, _) = ui.allocate_exact_size(vec2(28.0, 28.0), egui::Sense::hover());
+                    ui.painter().circle_filled(mark.center(), 13.0, t.red);
+                    let bar = egui::Rect::from_center_size(mark.center(), vec2(3.0, 12.0)).translate(vec2(0.0, -2.5));
+                    ui.painter().rect_filled(bar, 1.0, t.on_accent);
+                    ui.painter().circle_filled(mark.center() + vec2(0.0, 7.0), 1.8, t.on_accent);
+                    ui.add(egui::Label::new(text.as_str()).selectable(true).wrap());
+                });
+                ui.add_space(6.0);
+                button_row(ui, |ui| {
+                    let ok = primary_button(ui, tl!("OK"), true);
+                    app.hit.add("refusedOk", 0, ok.rect);
+                    close |= ok.clicked();
+                });
+            });
+            // OK is what Enter means here too.
+            close |= !open || enter;
+        }
         Dialog::Confirm { command, params, ask } => {
             // The way of going ahead that was picked: what it adds to the parameters.
             let mut picked: Option<Value> = None;
@@ -1008,8 +1172,27 @@ pub fn show(app: &mut MailApp, ctx: &egui::Context) {
                 }
             }
         }
-        Dialog::About => {
-            let open = window(ctx, tl!("About MailCraft"), 420.0, |ui| {
+        Dialog::About(tab) => {
+            let width = if *tab == AboutTab::Contributors { 720.0 } else { 420.0 };
+            let open = window(ctx, tl!("About MailCraft"), width, |ui| {
+                ui.horizontal(|ui| {
+                    for (which, label) in [(AboutTab::About, "About"), (AboutTab::Contributors, "Contributors")] {
+                        if ui.selectable_label(*tab == which, tl!(label)).clicked() {
+                            *tab = which;
+                        }
+                    }
+                });
+                ui.separator();
+                if *tab == AboutTab::Contributors {
+                    crate::credits::contributors_ui(ui, &t);
+                    ui.add_space(4.0);
+                    button_row(ui, |ui| {
+                        if primary_button(ui, tl!("Close"), true).clicked() || enter {
+                            close = true;
+                        }
+                    });
+                    return;
+                }
                 ui.label(egui::RichText::new("MailCraft").font(semibold(20.0)).color(t.accent_text));
                 ui.label(
                     egui::RichText::new(crate::i18n::fmt(tl!("Version {version}"), &[("version", env!("CARGO_PKG_VERSION"))])).color(t.text_dim),
@@ -1026,13 +1209,18 @@ pub fn show(app: &mut MailApp, ctx: &egui::Context) {
                     .color(t.text_dim),
                 );
                 ui.add_space(4.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                button_row(ui, |ui| {
                     if primary_button(ui, tl!("Close"), true).clicked() || enter {
                         close = true;
                     }
                 });
             });
             close |= !open;
+        }
+        Dialog::GraphSwitch { account } => {
+            let account = *account;
+            // (Escape doesn't answer it: closed with its close button, it is asked again next time.)
+            close = crate::graph_switch::show(app, ctx, account);
         }
         Dialog::Form(form) => {
             let title = form.title();
@@ -1055,6 +1243,8 @@ pub fn show(app: &mut MailApp, ctx: &egui::Context) {
     if let Some(Dialog::Commands { query: id, selected: usize::MAX }) = reopen {
         let id = match id.as_str() {
             "sync.request" => "ui.sync".to_string(),
+            // Asked on its page, which says what the switch does.
+            "account.graphSwitch" => "ui.graphSwitch".to_string(),
             _ => id,
         };
         let _ = app.run(&id, json!({}));

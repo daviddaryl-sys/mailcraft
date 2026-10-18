@@ -7,11 +7,18 @@
 //! that keeps it marked `\Deleted`, for the mailbox-wide EXPUNGE would take what other programs
 //! marked too. A change is only made in a mailbox whose `UIDVALIDITY` is the one the UIDs were
 //! learned under, and when a step fails the rest of that mailbox's changes wait for the next run.
+//!
+//! Gmail (which says so with `X-GM-EXT-1`) keeps mail under labels, which IMAP shows as
+//! mailboxes, and every message that is not in the trash in its mailbox of all mail (`\All`,
+//! `[Gmail]/All Mail`). Archiving there takes the Inbox label away: a message archived here is
+//! moved to all mail when the server has no mailbox for archived mail, and no label is made for
+//! it. Expunging a message from a label only takes that label away, so a message deleted for good
+//! here is moved to the trash first and expunged there.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use mailcraft_model::Id;
-use mailcraft_model::sync::{Created, Deleted, FlagsPushed, Moved, RemoteOp, SyncRequest, SyncResult};
+use mailcraft_model::sync::{Created, Deleted, FlagsPushed, Moved, RemoteOp, SyncRequest, SyncResult, SyncStage, SyncStep};
+use mailcraft_model::{FolderKind, Id};
 use mailcraft_proto::ProtoError;
 use mailcraft_proto::imap::{Copied, Imap, Mailbox, decode_utf7, encode_utf7, uid_sets};
 
@@ -39,13 +46,14 @@ pub(crate) type Arrived = HashMap<String, Vec<(u32, u32)>>;
 pub(crate) fn push(run: &mut Run, imap: &mut Imap<Stream<'_>>, mailboxes: &[Mailbox]) -> Option<Arrived> {
     let request = run.request;
     let ops: Vec<&RemoteOp> = request.ops.iter().take(MAX_OPS).collect();
-    let mut push = Push { request, mailboxes, can_move: false, uidplus: false, destinations: HashMap::new(), arrived: Arrived::new() };
+    let mut push = Push { request, mailboxes, can_move: false, uidplus: false, gmail: false, destinations: HashMap::new(), arrived: Arrived::new() };
     if ops.iter().any(|op| !matches!(op, RemoteOp::Flags { .. })) {
         // Asked now: what a server can do is often only told once it knows who is asking.
         match imap.capabilities() {
             Ok(capabilities) => {
                 push.can_move = capabilities.iter().any(|c| c == "MOVE");
                 push.uidplus = capabilities.iter().any(|c| c == "UIDPLUS");
+                push.gmail = capabilities.iter().any(|c| c.eq_ignore_ascii_case("X-GM-EXT-1"));
             }
             // A server that won't say is taken for one that can do neither.
             Err(ProtoError::Rejected(_)) => {}
@@ -70,7 +78,7 @@ pub(crate) fn push(run: &mut Run, imap: &mut Imap<Stream<'_>>, mailboxes: &[Mail
         let here: Vec<&RemoteOp> = ops.iter().copied().filter(|op| op.mailbox() == remote).collect();
         let alive = push.mailbox(imap, remote, &here, &mut run.out);
         if run.out.has_news() || !run.out.errors.is_empty() {
-            run.hand_over(format!("Updated {} on the server", label(remote)));
+            run.hand_over(SyncStep::new(SyncStage::Updating, &label(remote), 0, 0));
         }
         if !alive {
             return None;
@@ -96,6 +104,8 @@ struct Push<'a> {
     can_move: bool,
     /// The server knows UID EXPUNGE.
     uidplus: bool,
+    /// The server is Gmail's, or works as it does (`X-GM-EXT-1`): see the module's notes.
+    gmail: bool,
     /// The destination worked out for each local folder; `None` for one that can't be had (the
     /// reason was reported once).
     destinations: HashMap<Id, Option<Destination>>,
@@ -112,7 +122,7 @@ fn has(flags: &[String], flag: &str) -> bool {
     flags.iter().any(|f| f.eq_ignore_ascii_case(flag))
 }
 
-impl Push<'_> {
+impl<'a> Push<'a> {
     /// Make the changes `ops` ask for in the mailbox known here as `remote`. Returns whether the
     /// connection is still good for the next mailbox.
     fn mailbox(&mut self, imap: &mut Imap<Stream<'_>>, remote: &str, ops: &[&RemoteOp], result: &mut SyncResult) -> bool {
@@ -324,6 +334,9 @@ impl Push<'_> {
                 result.deleted.push(Deleted { from: remote.to_string(), uid: *uid });
             }
         }
+        if let Some(trash) = self.gmail_trash().filter(|trash| kinds::remote_name(trash) != remote && !uids.is_empty()) {
+            return self.delete_through(imap, remote, name, &uids, trash, result);
+        }
         for (set, uids) in uid_sets(&uids) {
             let removed = self.remove(imap, &set);
             // Marked as deleted is as good as gone: no mail program shows it, and the server
@@ -344,6 +357,72 @@ impl Push<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Gmail's trash, where a message deleted for good is put before it is expunged: at Gmail an
+    /// expunge from any other mailbox only takes a label away. `None` at another server, and at
+    /// one that can't move a message in one step (copying it there would leave the original).
+    fn gmail_trash(&self) -> Option<&'a Mailbox> {
+        let mailboxes = self.mailboxes;
+        let has = |flag: &str| mailboxes.iter().find(|m| kinds::selectable(m) && m.has_flag(flag));
+        (self.gmail && self.can_move).then(|| has("\\All").and(has("\\Trash"))).flatten()
+    }
+
+    /// Delete for good, at Gmail, the messages `uids` of the mailbox known here as `remote`: move
+    /// them to the `trash`, then remove them there by the UIDs the server gave them. A message
+    /// that is in the trash is as good as gone (no mail program shows it there as anything but
+    /// deleted, and Gmail empties it by itself), so it is noted as deleted once it is there; one
+    /// that is left there because the server didn't say its new UID, or wouldn't remove it, comes
+    /// down into Deleted Items with the next run, and is not lost.
+    fn delete_through(
+        &mut self,
+        imap: &mut Imap<Stream<'_>>,
+        remote: &str,
+        name: &str,
+        uids: &[u32],
+        trash: &Mailbox,
+        result: &mut SyncResult,
+    ) -> Result<(), bool> {
+        let mut there: Vec<(u32, u32)> = Vec::new();
+        let mut outcome = Ok(());
+        for (set, uids) in uid_sets(uids) {
+            match imap.uid_move(&set, &trash.raw) {
+                Ok(copied) => {
+                    result.deleted.extend(uids.iter().map(|uid| Deleted { from: remote.to_string(), uid: *uid }));
+                    let copied = copied.unwrap_or_default();
+                    there.extend(copied.uids.iter().map(|(_, new_uid)| (copied.uid_validity, *new_uid)).filter(|(_, uid)| *uid != 0));
+                }
+                Err(e) => {
+                    outcome = Err(stop(result, format!("Couldn't delete messages from \"{name}\": {e}"), &e.into()));
+                    break;
+                }
+            }
+        }
+        if there.is_empty() {
+            return outcome;
+        }
+        let trash_name = shown(&kinds::remote_name(trash));
+        let selected = match imap.select(&trash.raw, false) {
+            Ok(selected) => selected,
+            Err(e) => return Err(stop(result, format!("Couldn't open \"{trash_name}\" to delete messages for good: {e}"), &e.into())),
+        };
+        // UIDs the server gave under another life of the mailbox name other messages now.
+        let new_uids: Vec<u32> = there.iter().filter(|(validity, _)| *validity == selected.uid_validity).map(|(_, uid)| *uid).collect();
+        for (set, _) in uid_sets(&new_uids) {
+            match self.remove(imap, &set) {
+                Ok(()) => {}
+                Err(Removal::Unmarked(e)) => {
+                    return Err(stop(result, format!("Messages deleted from \"{name}\" are still in \"{trash_name}\": {e}"), &e.into()));
+                }
+                Err(Removal::Marked(e)) => {
+                    let e = NetError::from(e);
+                    if e.is_fatal() {
+                        return Err(stop(result, format!("Couldn't bring \"{trash_name}\" up to date: {e}"), &e));
+                    }
+                }
+            }
+        }
+        outcome
     }
 
     /// Mark the messages of `set` as deleted and, on a server that can remove single messages,
@@ -392,6 +471,11 @@ impl Push<'_> {
             let mailbox = self.listed(to).filter(|m| kinds::selectable(m)).ok_or_else(|| gone(to))?;
             return Ok(Destination { raw: mailbox.raw.clone(), remote: to.to_string() });
         }
+        if let Some(all) = self.gmail_archive(to_folder) {
+            // Gmail's archive: the folder follows all mail from now on, and no label is made.
+            result.created.push(Created { folder: to_folder, remote: all.remote.clone() });
+            return Ok(all);
+        }
         let (raw, remote) = self.name_below(to, create)?;
         if let Some(there) = self.already_there(&raw, &remote, to_folder) {
             // Made meanwhile by another program: it is the folder's mailbox.
@@ -411,6 +495,26 @@ impl Push<'_> {
             return Err((format!("Couldn't make the folder \"{}\" on the server: {e}", shown(&remote)), false));
         }
         Ok(Destination { raw, remote })
+    }
+
+    /// Where the messages archived here go at Gmail when the local folder `to_folder` is the
+    /// Archive and follows no mailbox yet, and the server has none for archived mail: its mailbox
+    /// of all mail (`\All`), which moving a message to takes the message's label away, as Gmail's
+    /// own Archive does. That mailbox is never read as a folder of its own ([`kinds::plan`] leaves
+    /// it out, for it has every message of every other one): it is only where archived messages
+    /// are put, and where they are moved, flagged and deleted from by their UIDs there.
+    fn gmail_archive(&self, to_folder: Id) -> Option<Destination> {
+        let archive = self.request.folders.iter().any(|f| f.id == to_folder && f.kind == FolderKind::Archive && f.remote.is_empty());
+        if !self.gmail || !archive || kinds::plan(self.mailboxes, &[]).iter().any(|(_, kind)| *kind == FolderKind::Archive) {
+            return None;
+        }
+        let all = self.mailboxes.iter().find(|m| kinds::selectable(m) && m.has_flag("\\All"))?;
+        let remote = kinds::remote_name(all);
+        // Another folder here follows it already: an archive can't be told from that folder's mail.
+        if remote.is_empty() || self.request.folders.iter().any(|f| f.id != to_folder && f.remote == remote) {
+            return None;
+        }
+        Some(Destination { raw: all.raw.clone(), remote })
     }
 
     /// The server's mailbox known here as `remote`.
@@ -474,6 +578,11 @@ impl Push<'_> {
     fn adopt(&mut self, op: &RemoteOp, result: &mut SyncResult) {
         let RemoteOp::Move { to, to_folder, create, .. } = op else { return };
         if create.is_empty() || self.destinations.contains_key(to_folder) {
+            return;
+        }
+        if let Some(all) = self.gmail_archive(*to_folder) {
+            result.created.push(Created { folder: *to_folder, remote: all.remote.clone() });
+            self.destinations.insert(*to_folder, Some(all));
             return;
         }
         let Ok((raw, remote)) = self.name_below(to, create) else { return };

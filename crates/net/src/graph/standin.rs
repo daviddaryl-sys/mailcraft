@@ -49,12 +49,39 @@
 //!   ([`Configuration::Denied`], [`State::folders_denied`]), entries for folders that are gone
 //!   or belong to another mailbox, entries that are no folders, and a document that is anything
 //!   at all ([`State::configuration_document`]).
+//! - **Other mailboxes** (#70). `/v1.0/users/{address}/mailFolders…`,
+//!   `/users/{address}/messages[/{id}[/$value|/move|/copy|/send|/createReply…|/attachments]]` and
+//!   `/users/{address}/sendMail` answer a shared mailbox's folders, drafts, sending and
+//!   mail as `/me` answers the owner's, its changes made in it alone ([`State::add_other`]); 403 when the owner wasn't given Full Access to
+//!   it, 404 for an address it doesn't know.
+//! - **Search** (R6.2). `$search` on `/me/messages` and `/me/mailFolders/{id}/messages` (and a
+//!   shared mailbox's), as the reference has it for messages: [`search`].
+//! - **Messages.** A folder's message delta in pages, with next and delta links, `@removed`,
+//!   replays, forgotten and reset links, and a message's MIME (`$value`): [`messages`]. Changes
+//!   of a message (read, flag, categories, importance, extended properties), move, copy and
+//!   delete, a folder's messages found by an extended property, and faults on demand per
+//!   message (404, 403, 400, 429, an answer lost): [`changes`].
+//! - **Drafts and attachments.** Drafts made from JSON or MIME, answers and forwards made with
+//!   create-reply, create-reply-all and create-forward, a draft's subject, body and recipients
+//!   changed in place, attachments added, listed and deleted, large ones through upload
+//!   sessions, and answers lost on demand ([`State::lose_next`]): [`drafts`].
 //! - **Time.** [`State::stale_views`] calendar views after a change are answered as the calendar
 //!   was before it: an answer may be older than the last change. [`State::keeps_times`] makes it
 //!   say yes to a change of time and not make it, which no client should take for done.
 //!
 //! [`route`] has the calls of this crate that go to Graph go to a stand-in instead, on the
 //! thread that asks for it and until the guard is dropped.
+
+mod changes;
+mod drafts;
+mod messages;
+mod search;
+mod send;
+
+pub use changes::Fault;
+pub use drafts::Attached;
+pub use messages::{Mail, Message};
+pub use send::Sent;
 
 use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -73,8 +100,10 @@ pub const CONFIGURATION_CANARY: &str = "not-for-anybody-7c1e";
 const MAIL_FOLDER_PROPERTIES: &[&str] =
     &["id", "displayName", "parentFolderId", "childFolderCount", "unreadItemCount", "totalItemCount", "sizeInBytes", "isHidden"];
 /// Largest request it reads, and how many entries a page of a list has when none is asked for.
-const MAX_REQUEST: usize = 4 * 1024 * 1024;
+const MAX_REQUEST: usize = 5 * 1024 * 1024;
 const PAGE: usize = 10;
+/// Most requests kept for a test to look at.
+const MAX_KEPT: usize = 20_000;
 /// Most occurrences of one series in one answer.
 const MAX_OCCURRENCES: usize = 2_000;
 
@@ -197,6 +226,37 @@ pub struct Favorite {
     pub folder_id: String,
 }
 
+/// A mailbox other than the owner's (#70: a shared mailbox, `support@`), answered at
+/// `/v1.0/users/{address}/mailFolders…` and `/v1.0/users/{address}/messages/{id}/$value` as the
+/// owner's own is at `/me/…`: its own folders, messages and rounds of delta. Its ids are made as
+/// the owner's are, so the same id may name a message in each.
+#[derive(Clone, Debug, Default)]
+pub struct OtherMailbox {
+    pub address: String,
+    /// The owner of the token was given Full Access to it; otherwise every question about it is
+    /// answered 403 (`ErrorAccessDenied`), as Exchange does.
+    pub full_access: bool,
+    /// What every question about it is answered instead, when set: a status and Graph's code
+    /// (a 403 `ErrorQuotaExceeded`, a 404 `MailboxNotEnabledForRESTAPI`…), to tell 403s apart.
+    pub refusing: Option<(u16, &'static str)>,
+    /// Exchange doesn't let the owner of the token send as it, nor on its behalf: a send from it
+    /// is answered 403 `ErrorSendAsDenied`, and nothing goes (Full Access alone can't send).
+    pub send_as_denied: bool,
+    pub folders: Vec<MailFolder>,
+    pub mailbox: Mail,
+}
+
+/// The special folders every mailbox has under its top, by their names and well-known names.
+const SPECIAL_FOLDERS: [(&str, &str); 7] = [
+    ("Inbox", "inbox"),
+    ("Drafts", "drafts"),
+    ("Sent Items", "sentitems"),
+    ("Deleted Items", "deleteditems"),
+    ("Junk Email", "junkemail"),
+    ("Archive", "archive"),
+    ("Outbox", "outbox"),
+];
+
 /// Whether the mailbox has the cached configuration of Outlook on the web, and may be asked.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Configuration {
@@ -221,6 +281,8 @@ pub struct Asked {
     /// Names in lower case.
     pub headers: Vec<(String, String)>,
     pub body: String,
+    /// The body as it came, byte for byte (the piece of an upload). Not kept with the requests.
+    pub bytes: Vec<u8>,
     pub status: u16,
 }
 
@@ -300,6 +362,31 @@ pub struct State {
     pub broken_lists: Vec<String>,
     /// The prefixes the document writes its two namespaces with (`a` and `b` unless said).
     pub prefixes: (String, String),
+    /// The messages of every folder, and the rounds of their delta ([`messages`]).
+    pub mailbox: Mail,
+    /// The mailboxes other than the owner's that it knows (#70); any other address is 404
+    /// (`ErrorInvalidUser`).
+    pub others: Vec<OtherMailbox>,
+    /// Whose mailbox is being answered for: empty for the owner's (`me`), else
+    /// `users/{address}` as the links it writes name it.
+    at: String,
+    /// Requests to carry out and then lose the answer to, one each: a method and an address,
+    /// `*` for any one piece of it (`POST /v1.0/me/messages`, `PUT /upload/*`).
+    pub lose_next: Vec<String>,
+    /// What it sent, in order ([`send`]).
+    pub sent: Vec<Sent>,
+    /// What every search of messages is answered with instead (a status and Graph's code), when
+    /// set ([`search`]).
+    pub search_refused: Option<(u16, &'static str)>,
+    /// How many searches of messages it answered.
+    pub searches: usize,
+    /// The `Location` header of the answer being made, when it has one.
+    location: Option<String>,
+    /// The answer being made when it isn't JSON: its type and its body.
+    raw: Option<(String, String)>,
+    /// The request was carried out and its answer is to be lost: the connection is closed
+    /// without a word ([`Fault::AnswerLost`]).
+    lose_answer: bool,
     before: Option<Vec<Stored>>,
     made: u64,
     clock: Timestamp,
@@ -757,6 +844,108 @@ impl State {
         id
     }
 
+    /// Another mailbox at `address`, with the top and the special folders every mailbox has and
+    /// no mail (#70); `full_access` says whether the owner of the token may open it.
+    pub fn add_other(&mut self, address: &str, full_access: bool) {
+        let owners = std::mem::take(&mut self.folders);
+        self.made += 1;
+        let top = MailFolder {
+            id: format!("AQMkAGV4YW1wbGUtb3JnLXNoYXJlZC1tYWlsYm94AC4AAAOTW-9DHtGRL6dO2oHcvR30QEAWHZz4qn_RpOZa83i5jHVGgAACAQ{:04}AAAA=", self.made),
+            name: "Top of Information Store".into(),
+            parent: "AQMkAGV4YW1wbGUtb3JnLXNoYXJlZC1tYWlsYm94AC4AAAOTW-9DHtGRL6dO2oHcvR30QEAWHZz4qn_RpOZa83i5jHVGgAACAQEAAAA=".into(),
+            well_known: "msgfolderroot".into(),
+            ..Default::default()
+        };
+        self.folders.push(top);
+        for (name, well_known) in SPECIAL_FOLDERS {
+            let id = self.add_folder(name, None);
+            if let Some(folder) = self.folders.iter_mut().find(|folder| folder.id == id) {
+                folder.well_known = well_known.into();
+            }
+        }
+        let folders = std::mem::replace(&mut self.folders, owners);
+        self.others.push(OtherMailbox {
+            address: address.to_string(),
+            full_access,
+            refusing: None,
+            send_as_denied: false,
+            folders,
+            mailbox: Mail::default(),
+        });
+    }
+
+    /// The other mailbox at `address` (#70), to set up and to look at.
+    pub fn other(&mut self, address: &str) -> Option<&mut OtherMailbox> {
+        self.others.iter_mut().find(|other| other.address.eq_ignore_ascii_case(address))
+    }
+
+    /// Whose mailbox the links it writes name: `me`, or `users/{address}` (#70).
+    fn whose(&self) -> &str {
+        if self.at.is_empty() { "me" } else { &self.at }
+    }
+
+    /// `/v1.0/users/{user}/…`: another mailbox, answered as the owner's own is, with its folders
+    /// and its mail in their place for as long as it takes (#70).
+    fn of_user(&mut self, asked: &Asked, method: &str, user: &str, rest: &[&str]) -> Result<Answer, Refusal> {
+        let Some(at) = self.others.iter().position(|other| other.address.eq_ignore_ascii_case(user)) else {
+            return Err(refuse(404, "ErrorInvalidUser", format!("The requested user '{user}' is invalid.")));
+        };
+        let Some(other) = self.others.get_mut(at) else { return Err(not_found()) };
+        if let Some((status, code)) = other.refusing {
+            return Err(refuse(status, code, "Refused, as asked."));
+        }
+        if !other.full_access {
+            return Err(refuse(403, "ErrorAccessDenied", "Access is denied. Check credentials and try again."));
+        }
+        let sending = method == "POST" && matches!(rest, ["sendMail"] | ["messages", _, "send"]);
+        if sending && other.send_as_denied {
+            return Err(refuse(
+                403,
+                "ErrorSendAsDenied",
+                "The user account which was used to submit this request does not have the right to send mail on behalf of the specified sending account.",
+            ));
+        }
+        let (mut folders, mut mailbox) = (std::mem::take(&mut other.folders), std::mem::take(&mut other.mailbox));
+        std::mem::swap(&mut self.folders, &mut folders);
+        std::mem::swap(&mut self.mailbox, &mut mailbox);
+        // Its drafts are its own, from its own address (#70, slice 4).
+        let owner = std::mem::replace(&mut self.owner, user.to_string());
+        let (local, domain) = user.split_once('@').unwrap_or((user, ""));
+        self.at = format!("users/{}@{}", crate::http::encode(local), crate::http::encode(domain));
+        let answer = match rest {
+            ["mailFolders"] => self.mail_folders(asked, method, None, &[]),
+            ["mailFolders", folder, rest @ ..] => self.mail_folders(asked, method, Some(folder), rest),
+            ["messages", id, "$value"] if method == "GET" => self.message_value(id),
+            ["messages"] if method == "GET" && asked.param("$search").is_some() => self.search_messages(asked, None),
+            // Its drafts made, changed and sent, and its mail sent, there alone: the copy in its
+            // own Sent Items (#70, slice 4). (A large attachment's upload is the owner's only.)
+            ["messages"] if method == "POST" => self.create_message(asked),
+            ["sendMail"] if method == "POST" => self.send_mail(asked),
+            ["messages", id, "send"] if method == "POST" => self.send_draft(asked, id),
+            ["messages", id, action @ ("createReply" | "createReplyAll" | "createForward")] if method == "POST" => {
+                self.create_answer(asked, id, action)
+            }
+            ["messages", id, "attachments"] => self.attachments_at(asked, method, id, None),
+            ["messages", id, "attachments", attachment] if *attachment != "createUploadSession" => {
+                self.attachments_at(asked, method, id, Some(attachment))
+            }
+            // Its messages read, changed, moved, copied and deleted, within it alone: a folder
+            // of another mailbox is no destination here (#70, slice 3).
+            ["messages", id] => self.message_at(asked, method, id, None),
+            ["messages", id, action @ ("move" | "copy")] => self.message_at(asked, method, id, Some(action)),
+            [first, ..] => Err(refuse(400, "BadRequest", format!("Resource not found for the segment '{first}'."))),
+            [] => Err(refuse(405, "MethodNotAllowed", "The method is not allowed on this resource.")),
+        };
+        self.at.clear();
+        self.owner = owner;
+        std::mem::swap(&mut self.folders, &mut folders);
+        std::mem::swap(&mut self.mailbox, &mut mailbox);
+        if let Some(other) = self.others.get_mut(at) {
+            (other.folders, other.mailbox) = (folders, mailbox);
+        }
+        answer
+    }
+
     /// The id of the folder that answers to a well-known name (`inbox`, `msgfolderroot`…);
     /// empty when the mailbox has none.
     pub fn well_known(&self, name: &str) -> String {
@@ -856,13 +1045,14 @@ impl State {
     /// it names any.
     fn folder_json(&self, folder: &MailFolder, select: Option<&[&str]>) -> Value {
         let children = self.folders.iter().filter(|other| other.parent == folder.id).count();
+        let (total, unread) = self.mailbox.counts(&folder.id);
         let mut all = json!({
             "id": folder.id,
             "displayName": folder.name,
             "parentFolderId": folder.parent,
             "childFolderCount": children,
-            "unreadItemCount": 0,
-            "totalItemCount": 0,
+            "unreadItemCount": unread,
+            "totalItemCount": total,
             "sizeInBytes": 0,
             "isHidden": folder.hidden,
         });
@@ -905,6 +1095,13 @@ impl State {
                 self.folder_create(asked, &id)
             }
             ("POST", Some(named), ["move"]) => self.folder_move(asked, named),
+            ("GET", Some(named), ["messages", "delta"]) => self.message_delta(asked, named),
+            ("GET", Some(named), ["messages"]) if asked.param("$search").is_some() => self.search_messages(asked, Some(named)),
+            ("GET", Some(named), ["messages"]) => self.folder_messages(asked, named),
+            (_, Some(named), ["messages", id, action @ ..]) if action.len() <= 1 => {
+                self.mail_folder(named)?;
+                self.message_at(asked, method, id, action.first().copied())
+            }
             (_, _, [] | ["childFolders"] | ["move"]) => Err(refuse(405, "MethodNotAllowed", "The method is not allowed on this resource.")),
             (_, _, [other, ..]) => Err(refuse(400, "BadRequest", format!("Resource not found for the segment '{other}'."))),
         }
@@ -1622,6 +1819,23 @@ impl State {
 
     /// Answer one request.
     fn answer(&mut self, asked: &Asked) -> Result<Answer, Refusal> {
+        let answer = self.answer_of(asked);
+        if answer.is_ok()
+            && let Some(at) = self.lose_next.iter().position(|pattern| drafts::aims_at(pattern, &asked.method, &asked.path))
+        {
+            self.lose_next.remove(at);
+            self.lose_answer = true;
+        }
+        answer
+    }
+
+    fn answer_of(&mut self, asked: &Asked) -> Result<Answer, Refusal> {
+        // An upload's own address: its token is its permission (no Authorization).
+        if let [first, token] = asked.path.as_slice()
+            && first == "upload"
+        {
+            return self.upload_piece(asked, token);
+        }
         if asked.header("authorization") != format!("Bearer {}", self.token) {
             return Err(refuse(401, "InvalidAuthenticationToken", "Access token validation failure."));
         }
@@ -1633,11 +1847,24 @@ impl State {
                 "ErrorItemNotFound" => "ErrorItemNotFound",
                 "ErrorAccessDenied" => "ErrorAccessDenied",
                 "ErrorInvalidRequest" => "ErrorInvalidRequest",
+                "ErrorInvalidUser" => "ErrorInvalidUser",
+                "ErrorQuotaExceeded" => "ErrorQuotaExceeded",
+                "ErrorSendAsDenied" => "ErrorSendAsDenied",
                 _ => "ServiceUnavailable",
             };
             return Err(refuse(status, code, "The stand-in was told to say so."));
         }
-        if !asked.body.is_empty() && !asked.header("content-type").to_ascii_lowercase().starts_with("application/json") {
+        // A message is also made, or sent, from its MIME in base64.
+        // (Another mailbox's, at `/users/{address}/…`, as the owner's: #70.)
+        let made_or_sent = |what: &String| what == "messages" || what == "sendMail";
+        let mime = asked.method == "POST"
+            && match asked.path.as_slice() {
+                [v, me, what] => v == "v1.0" && me == "me" && made_or_sent(what),
+                [v, users, _, what] => v == "v1.0" && users == "users" && made_or_sent(what),
+                _ => false,
+            }
+            && asked.header("content-type").to_ascii_lowercase().starts_with("text/plain");
+        if !mime && !asked.body.is_empty() && !asked.header("content-type").to_ascii_lowercase().starts_with("application/json") {
             return Err(refuse(415, "RequestBodyRead", "A body is JSON, and says so in its Content-Type."));
         }
         let path: Vec<&str> = asked.path.iter().map(String::as_str).collect();
@@ -1649,6 +1876,10 @@ impl State {
             (_, ["v1.0", "me", "mailFolders"]) => self.mail_folders(asked, method, None, &[]),
             (_, ["v1.0", "me", "mailFolders", folder, rest @ ..]) => self.mail_folders(asked, method, Some(folder), rest),
             (_, ["v1.0", "me", rest @ ..]) => self.me(asked, method, rest),
+            (_, ["v1.0", "users", user, rest @ ..]) => {
+                let user = user.to_string();
+                self.of_user(asked, method, &user, rest)
+            }
             (_, [first, ..]) => Err(refuse(400, "BadRequest", format!("Resource not found for the segment '{first}'."))),
             _ => Err(refuse(400, "BadRequest", "Resource not found.")),
         }
@@ -1685,6 +1916,19 @@ impl State {
                 let group = json!({"id": "AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBgAA-group=", "name": "My Calendars"});
                 self.page(asked, vec![group])
             }
+            ["messages"] if method == "POST" => self.create_message(asked),
+            ["messages"] if method == "GET" && asked.param("$search").is_some() => self.search_messages(asked, None),
+            ["sendMail"] if method == "POST" => self.send_mail(asked),
+            ["messages", id, "send"] if method == "POST" => self.send_draft(asked, id),
+            ["messages", id, "$value"] if method == "GET" => self.message_value(id),
+            ["messages", id, action @ ("createReply" | "createReplyAll" | "createForward")] if method == "POST" => {
+                self.create_answer(asked, id, action)
+            }
+            ["messages", id, "attachments"] => self.attachments_at(asked, method, id, None),
+            ["messages", id, "attachments", "createUploadSession"] if method == "POST" => self.upload_session(asked, id),
+            ["messages", id, "attachments", attachment] => self.attachments_at(asked, method, id, Some(attachment)),
+            ["messages", id] => self.message_at(asked, method, id, None),
+            ["messages", id, action] => self.message_at(asked, method, id, Some(action)),
             ["contacts"] | ["outlook", "masterCategories"] if method == "GET" => self.page(asked, Vec::new()),
             ["mailboxSettings", "workingHours"] if method == "GET" => Ok((
                 200,
@@ -2018,6 +2262,7 @@ fn parse_target(method: &str, target: &str, headers: Vec<(String, String)>, body
         query: crate::http::pairs(query),
         headers,
         body,
+        bytes: Vec::new(),
         status: 0,
     }
 }
@@ -2044,7 +2289,9 @@ fn read_request(stream: &TcpStream) -> Option<Asked> {
     }
     let mut body = vec![0u8; length];
     reader.read_exact(&mut body).ok()?;
-    Some(parse_target(&method, &target, headers, String::from_utf8_lossy(&body).into_owned()))
+    let mut asked = parse_target(&method, &target, headers, String::from_utf8_lossy(&body).into_owned());
+    asked.bytes = body;
+    Some(asked)
 }
 
 /// A stand-in for Graph's calendar on a loopback port, with the calendar it keeps.
@@ -2081,16 +2328,7 @@ impl StandIn {
             ..Default::default()
         };
         state.folders.push(top);
-        let special = [
-            ("Inbox", "inbox"),
-            ("Drafts", "drafts"),
-            ("Sent Items", "sentitems"),
-            ("Deleted Items", "deleteditems"),
-            ("Junk Email", "junkemail"),
-            ("Archive", "archive"),
-            ("Outbox", "outbox"),
-        ];
-        for (name, well_known) in special {
+        for (name, well_known) in SPECIAL_FOLDERS {
             let id = state.add_folder(name, None);
             if let Some(folder) = state.folders.iter_mut().find(|folder| folder.id == id) {
                 folder.well_known = well_known.into();
@@ -2107,8 +2345,21 @@ impl StandIn {
                     Err(refusal) => (refusal.0, Some(error_body(&refusal))),
                 };
                 asked.status = status;
+                asked.bytes = Vec::new();
+                // Only the latest requests are kept: a mailbox of 200,000 messages takes thousands.
+                if state.requests.len() >= MAX_KEPT {
+                    state.requests.drain(..MAX_KEPT / 2);
+                }
                 state.requests.push(asked);
+                // Carried out, and the answer lost: the connection closes before a word of it.
+                if std::mem::take(&mut state.lose_answer) {
+                    state.location = None;
+                    state.raw = None;
+                    continue;
+                }
                 let wait = state.retry_after.unwrap_or(1);
+                let location = state.location.take().map(|to| format!("Location: {to}\r\n")).unwrap_or_default();
+                let raw = state.raw.take();
                 drop(state);
                 let reason = match status {
                     200 => "OK",
@@ -2121,19 +2372,23 @@ impl StandIn {
                     404 => "Not Found",
                     405 => "Method Not Allowed",
                     409 => "Conflict",
+                    410 => "Gone",
                     429 => "Too Many Requests",
                     _ => "Other",
                 };
                 let retry = if status == 429 || status == 503 { format!("Retry-After: {wait}\r\n") } else { String::new() };
-                let answer = match body {
-                    Some(body) => {
+                let answer = match (raw, body) {
+                    (Some((kind, raw)), _) => {
+                        format!("HTTP/1.1 {status} {reason}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{raw}", raw.len())
+                    }
+                    (None, Some(body)) => {
                         let body = body.to_string();
                         format!(
-                            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; odata.metadata=minimal\r\n{retry}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; odata.metadata=minimal\r\n{retry}{location}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                             body.len()
                         )
                     }
-                    None => format!("HTTP/1.1 {status} {reason}\r\n{retry}Content-Length: 0\r\nConnection: close\r\n\r\n"),
+                    (None, None) => format!("HTTP/1.1 {status} {reason}\r\n{retry}{location}Content-Length: 0\r\nConnection: close\r\n\r\n"),
                 };
                 let _ = stream.write_all(answer.as_bytes());
             }

@@ -22,6 +22,87 @@ pub(crate) fn prefix(s: &str, max: usize) -> &str {
     s.get(..end).unwrap_or("")
 }
 
+/// The text of a vCard file from its bytes, each property's value read in the `CHARSET` it names.
+///
+/// vCard 2.1 lets a value be raw 8-bit bytes in a character set of its own
+/// (`FN;CHARSET=WINDOWS-1250:Gvo\xF0\xE6i\xE8`), so a file is read line by line: a value with
+/// bytes above 0x7F is decoded with the `CHARSET` of its property (a folded line goes on with the
+/// property above it), and without one it is UTF-8 when it is valid UTF-8, else Windows-1252. Names,
+/// parameters and values in ASCII (quoted-printable and base64 among them, decoded later with
+/// their charset) are kept as they are. A file that opens with a UTF-16 byte order mark is read as
+/// UTF-16 throughout.
+pub(crate) fn text_from_bytes(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+        return mailcraft_charset::decode(bytes, "utf-16");
+    }
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    if bytes.is_ascii() {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let mut out = String::with_capacity(bytes.len());
+    // The charset of the property being read, for the folded lines that go on with it.
+    let mut charset = String::new();
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let end = rest.iter().position(|b| matches!(b, b'\r' | b'\n')).unwrap_or(rest.len());
+        let skip = match (rest.get(end), rest.get(end.saturating_add(1))) {
+            (Some(b'\r'), Some(b'\n')) => 2,
+            (Some(_), _) => 1,
+            (None, _) => 0,
+        };
+        let line = rest.get(..end).unwrap_or(&[]);
+        let value = if line.starts_with(b" ") || line.starts_with(b"\t") {
+            line
+        } else if let Some(colon) = head_end(line) {
+            let head = line.get(..colon).unwrap_or(&[]);
+            charset = charset_of(head);
+            out.push_str(&String::from_utf8_lossy(head));
+            line.get(colon..).unwrap_or(&[])
+        } else {
+            charset.clear();
+            line
+        };
+        out.push_str(&value_text(value, &charset));
+        // The line break itself, as it was.
+        out.push_str(&String::from_utf8_lossy(rest.get(end..end.saturating_add(skip)).unwrap_or(&[])));
+        rest = rest.get(end.saturating_add(skip)..).unwrap_or(&[]);
+    }
+    out
+}
+
+/// Where the `:` that ends a line's name and parameters is: outside quotes, in the first kilobyte.
+fn head_end(line: &[u8]) -> Option<usize> {
+    let mut quoted = false;
+    for (i, b) in line.iter().enumerate().take(MAX_HEAD) {
+        match b {
+            b'"' => quoted = !quoted,
+            b':' if !quoted => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The `CHARSET` named among a line's parameters; empty when there is none.
+fn charset_of(head: &[u8]) -> String {
+    let head = String::from_utf8_lossy(head);
+    let named = head.split(';').skip(1).find_map(|param| {
+        let (name, value) = param.split_once('=')?;
+        name.trim().eq_ignore_ascii_case("CHARSET").then(|| value.trim().trim_matches('"').trim().to_string())
+    });
+    named.unwrap_or_default()
+}
+
+/// A value's bytes as text in `charset`, or guessed without one. ASCII stays as it is; a set that
+/// ASCII isn't part of (UTF-16, ISO-2022) can't be raw 8-bit bytes on a line, so it is guessed.
+fn value_text(value: &[u8], charset: &str) -> String {
+    let label = charset.to_ascii_lowercase();
+    if value.is_ascii() || label.starts_with("utf-16") || label.contains("2022") {
+        return mailcraft_charset::guess(value);
+    }
+    mailcraft_charset::decode(value, &label)
+}
+
 /// A cursor over the lines of a text. Lines end at CRLF, LF or CR.
 #[derive(Clone, Copy)]
 pub(crate) struct Lines<'a> {

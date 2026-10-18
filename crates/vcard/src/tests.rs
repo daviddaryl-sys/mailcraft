@@ -338,6 +338,32 @@ proptest! {
     }
 
     #[test]
+    fn arbitrary_bytes_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..2048)) {
+        let contacts = crate::parse_bytes(&bytes);
+        let _ = parse(&write(&contacts.iter().collect::<Vec<_>>()));
+    }
+
+    #[test]
+    fn card_shaped_bytes_never_panic(text in soup(), high in proptest::collection::vec((any::<prop::sample::Index>(), 0x80u8..=0xFF), 0..12), charset in proptest::sample::select(vec!["", "windows-1250", "UTF-8", "utf-16", "iso-2022-jp", "shift_jis", "x-unknown"])) {
+        // Card-shaped text with a charset named and raw 8-bit bytes dropped in.
+        let mut bytes = text.replace("FN:", &format!("FN;CHARSET={charset}:")).into_bytes();
+        for (at, byte) in high {
+            if !bytes.is_empty() {
+                let i = at.index(bytes.len());
+                bytes.insert(i, byte);
+            }
+        }
+        let _ = crate::parse_bytes(&bytes);
+    }
+
+    #[test]
+    fn utf8_bytes_read_as_the_text_does(text in soup()) {
+        // (A value in UTF-8 that says it is Latin-1 is read as Latin-1 from bytes.)
+        let text = text.replace("ISO-8859-1", "UTF-8");
+        prop_assert_eq!(crate::parse_bytes(text.as_bytes()), parse(&text));
+    }
+
+    #[test]
     fn card_shaped_junk_never_panics(text in soup()) {
         survives(&text);
     }

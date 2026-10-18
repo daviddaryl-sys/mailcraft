@@ -102,6 +102,35 @@ impl Address {
     }
 }
 
+/// Longest address a mailbox may have (RFC 5321's longest path, less its angle brackets).
+pub const MAX_ADDRESS: usize = 254;
+
+/// A mailbox's own address, strictly: `local@domain` in plain ASCII, with nothing that could
+/// carry it out of a piece of a URL's path or a protocol line. For an address that is used to
+/// name a mailbox to a server (a shared mailbox, `/users/{address}/…` in Microsoft Graph): the
+/// local part is RFC 5322's dot-atom, the domain dot-separated labels of letters, digits and
+/// hyphens, at most [`MAX_ADDRESS`] long. Trimmed, letter case kept; `None` when it isn't one.
+pub fn mailbox_address(text: &str) -> Option<String> {
+    let address = text.trim();
+    if address.is_empty() || address.len() > MAX_ADDRESS || !address.is_ascii() {
+        return None;
+    }
+    let (local, domain) = address.split_once('@')?;
+    // RFC 5322's `atext` without `#`, `%`, `/` and `?`, which a URL reads.
+    let atext = |b: u8| b.is_ascii_alphanumeric() || b"!$&'*+-=^_`{|}~".contains(&b);
+    let dot_atom =
+        |part: &str, allowed: &dyn Fn(u8) -> bool| !part.is_empty() && part.split('.').all(|piece| !piece.is_empty() && piece.bytes().all(allowed));
+    let label = |b: u8| b.is_ascii_alphanumeric() || b == b'-';
+    let labels_ok = domain.split('.').all(|piece| !piece.starts_with('-') && !piece.ends_with('-'));
+    let fits = local.len() <= 64
+        && dot_atom(local, &atext)
+        && dot_atom(domain, &label)
+        && labels_ok
+        && domain.contains('.')
+        && domain.split('.').all(|piece| piece.len() <= 63);
+    fits.then(|| address.to_string())
+}
+
 /// A recipient line: `Ada <ada@example.org>; bob@example.org`.
 pub fn format_list(list: &[Address]) -> String {
     list.iter().map(Address::full).collect::<Vec<_>>().join("; ")
@@ -141,5 +170,53 @@ mod tests {
             assert!(!Address::new("", bad).is_valid(), "{bad}");
         }
         assert!(a.same_mailbox(&Address::new("A.", "ADA@example.org")));
+    }
+
+    #[test]
+    fn a_mailbox_address_is_plain_and_can_name_nothing_else() {
+        for good in ["support@example.org", " Team.Sales+eu@mail.example.org ", "o'brien@example.org", "a@b-c.example"] {
+            assert_eq!(mailbox_address(good).as_deref(), Some(good.trim()), "{good}");
+        }
+        let long = format!("{}@example.org", "a".repeat(65));
+        for bad in [
+            "",
+            "support",
+            "support@",
+            "@example.org",
+            "support@example",
+            "sup port@example.org",
+            "a@b@example.org",
+            "a/../b@example.org",
+            "a@example.org/messages",
+            "a@example.org?x=1",
+            "a%40b@example.org",
+            "a#b@example.org",
+            "a\\b@example.org",
+            "a..b@example.org",
+            ".a@example.org",
+            "a@-example.org",
+            "a@example-.org",
+            "a@example..org",
+            "\"a\"@example.org",
+            "a@[127.0.0.1]",
+            "a\r\n@example.org",
+            "a@example.org\u{0}",
+            "ü@example.org",
+            long.as_str(),
+        ] {
+            assert_eq!(mailbox_address(bad), None, "{bad:?}");
+        }
+    }
+
+    proptest::proptest! {
+        /// Whatever it is given, what it lets through is plain and can't break out of a path.
+        #[test]
+        fn a_mailbox_address_never_lets_through_what_a_path_would_read(text in "\\PC{0,300}") {
+            if let Some(address) = mailbox_address(&text) {
+                proptest::prop_assert!(address.len() <= MAX_ADDRESS);
+                proptest::prop_assert!(address.bytes().all(|b| b.is_ascii_graphic() && !b"/?#%\\\"<>[]".contains(&b)));
+                proptest::prop_assert_eq!(address.matches('@').count(), 1);
+            }
+        }
     }
 }

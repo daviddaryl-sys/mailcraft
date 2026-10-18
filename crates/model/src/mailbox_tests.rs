@@ -568,3 +568,99 @@ fn a_change_waiting_for_a_mailbox_numbered_anew_is_kept_when_it_can_be_found_aga
     assert!(fixed.iter().any(|line| line.contains("waiting for the mail server")), "{fixed:?}");
     assert_eq!(mb.pending, [waiting]);
 }
+
+// ---- shared mailboxes (#70) ----
+
+/// A mailbox with a local account and a Microsoft account of an organisation.
+fn with_microsoft() -> (Mailbox, Id, Id) {
+    let (mut mb, local) = mailbox();
+    let oauth = OAuth { provider: OAuthProvider::Microsoft, directory: Directory::Organisation, ..Default::default() };
+    let owner = mb.add_account(Account {
+        email: "noor@example.org".into(),
+        kind: AccountKind::Microsoft,
+        oauth: Some(oauth),
+        download_in_full: DownloadInFull::UpTo25Mb,
+        ..Default::default()
+    });
+    (mb, local, owner)
+}
+
+#[test]
+fn a_shared_mailbox_opens_under_a_microsoft_account_with_folders_of_its_own() {
+    let (mut mb, local, owner) = with_microsoft();
+    let shared = mb.add_shared_mailbox(owner, " support@example.org ").unwrap();
+    let a = mb.account(shared).unwrap();
+    assert_eq!((a.email.as_str(), a.kind, a.shared_of, a.oauth.is_none()), ("support@example.org", AccountKind::Microsoft, Some(owner), true));
+    assert_eq!(a.download_in_full, DownloadInFull::UpTo25Mb, "as its owner has it");
+    assert!(a.is_shared() && !mb.account(owner).unwrap().is_shared());
+    assert_eq!(mb.owner_of(shared).map(|o| o.id), Some(owner));
+    assert_eq!((mb.owner_of(owner), mb.owner_of(local)), (None, None));
+    // Its own standard folders, none of them among the Favorites.
+    let names: Vec<&str> = mb.children(shared, None).iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["Inbox", "Drafts", "Sent Items", "Deleted Items", "Archive", "Junk Email", "Outbox"]);
+    assert!(mb.folders.iter().filter(|f| f.account == shared).all(|f| !f.favorite));
+    // Listed under its owner.
+    let b = mb.add_account(Account { email: "bob@example.org".into(), ..Default::default() });
+    let order: Vec<Id> = mb.accounts_in_order().iter().map(|a| a.id).collect();
+    assert_eq!(order, [local, owner, shared, b]);
+    assert_eq!(mb.shared_mailboxes(owner).iter().map(|a| a.id).collect::<Vec<_>>(), [shared]);
+}
+
+#[test]
+fn a_shared_mailbox_is_refused_where_it_cant_be_one() {
+    let (mut mb, local, owner) = with_microsoft();
+    let refused = |mb: &mut Mailbox, under: Id, address: &str| mb.add_shared_mailbox(under, address).unwrap_err().to_string();
+    assert!(refused(&mut mb, local, "support@example.org").contains("Microsoft Graph"));
+    assert!(refused(&mut mb, 999, "support@example.org").contains("no account"));
+    assert!(refused(&mut mb, owner, "noor@EXAMPLE.org").contains("own address"));
+    assert!(refused(&mut mb, owner, "ada@example.org").contains("already here"));
+    for bad in ["", "support", "support@example.org/../me", "x@example.org?$top=1", "a b@example.org", "\u{0}@example.org"] {
+        assert!(refused(&mut mb, owner, bad).contains("e-mail address"), "{bad:?}");
+    }
+    let shared = mb.add_shared_mailbox(owner, "support@example.org").unwrap();
+    assert!(refused(&mut mb, owner, "SUPPORT@example.org").contains("already here"));
+    assert!(refused(&mut mb, shared, "sales@example.org").contains("can't open another"));
+    for n in 1..MAX_SHARED {
+        mb.add_shared_mailbox(owner, &format!("team{n}@example.org")).unwrap();
+    }
+    assert!(refused(&mut mb, owner, "one-more@example.org").contains("at most"));
+    // A personal Microsoft account has none.
+    if let Ok(a) = mb.account_mut(owner) {
+        a.oauth = Some(OAuth { provider: OAuthProvider::Microsoft, directory: Directory::Personal, ..Default::default() });
+    }
+    assert!(refused(&mut mb, owner, "other@example.org").contains("personal"));
+}
+
+#[test]
+fn removing_an_account_takes_its_shared_mailboxes_and_their_mail() {
+    let (mut mb, _, owner) = with_microsoft();
+    let shared = mb.add_shared_mailbox(owner, "support@example.org").unwrap();
+    let inbox = mb.folder_of_kind(shared, FolderKind::Inbox).unwrap();
+    mb.add_message(mail(inbox, "For the team", 1)).unwrap();
+    // The shared mailbox alone goes by itself.
+    let other = mb.add_shared_mailbox(owner, "sales@example.org").unwrap();
+    mb.remove_account(other).unwrap();
+    assert!(mb.account(other).is_none() && mb.account(shared).is_some());
+    mb.remove_account(owner).unwrap();
+    assert!(mb.account(shared).is_none());
+    assert!(mb.folders.iter().all(|f| f.account != shared) && mb.messages.values().all(|m| m.account != shared));
+}
+
+#[test]
+fn a_file_from_before_shared_mailboxes_opens_and_one_with_nonsense_too() {
+    let old: Account = serde_json::from_str(r#"{"id": 3, "email": "noor@example.org", "kind": "microsoft"}"#).unwrap();
+    assert_eq!(old.shared_of, None);
+    assert!(!serde_json::to_string(&old).unwrap().contains("sharedOf"));
+    let odd: Account = serde_json::from_str(r#"{"id": 3, "email": "support@example.org", "sharedOf": "nobody"}"#).unwrap();
+    assert_eq!(odd.shared_of, None);
+    let (mut mb, _, owner) = with_microsoft();
+    let shared = mb.add_shared_mailbox(owner, "support@example.org").unwrap();
+    let again: Mailbox = serde_json::from_str(&serde_json::to_string(&mb).unwrap()).unwrap();
+    assert_eq!(again.account(shared).and_then(|a| a.shared_of), Some(owner));
+    // A shared mailbox that names itself, or an owner that isn't one, has no owner to read it.
+    if let Ok(a) = mb.account_mut(shared) {
+        a.shared_of = Some(shared);
+    }
+    assert!(mb.owner_of(shared).is_none());
+    assert_eq!(mb.accounts_in_order().len(), mb.accounts.len());
+}

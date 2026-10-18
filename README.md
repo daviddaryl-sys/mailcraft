@@ -36,7 +36,7 @@ This edition builds on the original MailCraft foundation with work focused on ac
 - **iCloud setup:** separate Apple calendar/contact service roots, constrained Apple server discovery, app-specific-password guidance, advertised IMAP SASL PLAIN support, and a fix for blocked account-dialog input. [iCloud details and verification limits](docs/icloud-setup.md).
 - **Credential protection:** changing an account's mail, calendar or separate contacts server clears its saved password/sign-in, including the OS credential-store entry, so a server change cannot silently carry remembered credentials to another endpoint.
 
-The DAV.4 source passed all six repository CI steps, including **1,746 tests** and the WASM build check. The Apple Silicon build has been used with three configured accounts; this is not a claim of compatibility with every provider or Mac. This remains an early-alpha project: review [known gaps](docs/gaps.md) before relying on it for important mail.
+The published DAV.4 source passed all six repository CI steps, including **1,746 tests** and the WASM build check. This integration branch also incorporates upstream 0.4.3 development work, including agent permissions, privacy-safe logging, Graph mail, improved storage, search and character decoding. Its builds are undergoing separate migration and regression verification; the published downloads below remain the verified 0.3.0 builds. The Apple Silicon build has been used with three configured accounts; this is not a claim of compatibility with every provider or Mac. This remains an early-alpha project: review [known gaps](docs/gaps.md) before relying on it for important mail.
 
 ## Original project and credit
 

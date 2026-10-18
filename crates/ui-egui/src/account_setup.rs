@@ -64,6 +64,9 @@ pub enum Page {
     /// The organisation has to approve MailCraft before its people can sign in: why, and what
     /// to do next. Also the whole dialog for an account that exists and was refused for it.
     Approval,
+    /// The owner signed in on the provider's page as somebody other than the address typed:
+    /// sign in again, or set up the account that signed in (#103).
+    SomeoneElse,
     /// The password, and the servers when they want a look.
     Password,
     /// The host is trying the password on the servers.
@@ -162,6 +165,8 @@ pub enum Action {
     CopyMessage,
     /// "Not now": close, leaving nothing behind.
     NotNow,
+    /// Set up the account that signed in, rather than the address that was typed.
+    UseSignedIn,
 }
 
 /// How setting the account up ended, for the last page to say.
@@ -400,6 +405,9 @@ pub struct AccountSetup {
     approval: help::Approval,
     /// An administrator approved MailCraft from this wizard: the sign-in that follows says so.
     approved: bool,
+    /// What a sign-in as somebody other than the address typed brought back, while the owner
+    /// says what to do about it. Kept in memory only, and gone with the dialog.
+    someone_else: Option<mailcraft_model::sync::Tokens>,
     /// The account the approval page is about, when it is one that exists (0: the one that is
     /// being set up), and its organisation's directory, when that is known.
     existing: Id,
@@ -487,6 +495,7 @@ impl AccountSetup {
             ended: None,
             approval: help::Approval::default(),
             approved: false,
+            someone_else: None,
             existing: 0,
             organisation: String::new(),
             done: false,
@@ -798,6 +807,12 @@ impl AccountSetup {
                 self.stop_sign_in(app);
                 self.go(Page::Choose);
             }
+            // "Sign in again": for the address typed; Microsoft's page asks who, every time.
+            (Page::SomeoneElse, Action::Go) => {
+                self.someone_else = None;
+                self.start_sign_in(app);
+            }
+            (Page::SomeoneElse, Action::UseSignedIn) => self.use_signed_in(app),
             (Page::Password, Action::Go) => self.try_password(app),
             (Page::Password, Action::Back) => {
                 self.forget_password();
@@ -989,17 +1004,14 @@ impl AccountSetup {
         self.settings_open = true;
     }
 
-    /// Add the account the owner just signed in to, with the tokens that brought back.
+    /// Add the account the owner just signed in to, with the tokens that brought back. One that
+    /// signed in as somebody other than the address typed is not added: the owner is asked
+    /// whether to sign in again or to set up the account that signed in (#103).
     fn add_signed_in(&mut self, app: &mut MailApp, tokens: mailcraft_model::sync::Tokens) {
-        // The servers know the owner by who signed in, which needn't be the address that was
-        // typed (an alias, say): that is the user name they are given.
-        let signed_in = tokens.email.trim();
-        let typed = self.email.trim();
-        if !signed_in.is_empty()
-            && !signed_in.eq_ignore_ascii_case(typed)
-            && (self.username.trim().is_empty() || self.username.trim().eq_ignore_ascii_case(typed))
-        {
-            self.username = signed_in.to_string();
+        if tokens.someone_else(self.email.trim(), "") {
+            self.someone_else = Some(tokens);
+            self.go(Page::SomeoneElse);
+            return;
         }
         // Which kind of Microsoft account it is: the directory the sign-in named says; without
         // that, whose servers the address was found to use (work or school mail, or Outlook.com).
@@ -1010,9 +1022,9 @@ impl AccountSetup {
         };
         let added = match self.add_command(&tokens.name) {
             Some((command, mut params)) => {
-                // With the switch for testing on, a Microsoft account is kept in step through
-                // Microsoft Graph, without mail servers (R3, MAILCRAFT_GRAPH_MAIL=1).
-                if app.session.graph_mail && self.oauth.as_ref().is_some_and(|o| o.provider == mailcraft_model::OAuthProvider::Microsoft) {
+                // A Microsoft account is kept in step through Microsoft Graph, without mail servers
+                // (R3), unless the owner asked for mail only (that is IMAP's, until R3.8).
+                if !self.mail_only && self.oauth.as_ref().is_some_and(|o| o.provider == mailcraft_model::OAuthProvider::Microsoft) {
                     params["kind"] = json!("microsoft");
                 }
                 app.execute(command, params)
@@ -1026,6 +1038,33 @@ impl AccountSetup {
             }
             Ok(None) => self.error = tl!("The account couldn't be added").to_string(),
             Err(e) => self.error = e,
+        }
+    }
+
+    /// "Use …" on the page about a sign-in as somebody else: the account that is set up is the
+    /// one that signed in, by its own address and the name the provider gave. Should that not be
+    /// added (it is set up already, say), the page stays, saying why, with the address typed.
+    fn use_signed_in(&mut self, app: &mut MailApp) {
+        let Some(tokens) = self.someone_else.take() else { return };
+        let who = line(&tokens.email, LINE);
+        if address(&who).is_none() {
+            self.error = fmt(tl!("\"{address}\" isn't an e-mail address"), &[("address", &shown(&who, 80))]);
+            return;
+        }
+        let typed = (self.email.clone(), self.name.clone(), self.username.clone());
+        (self.email, self.name) = (who.clone(), line(&tokens.name, LINE));
+        // The servers know the owner by the address that signed in.
+        if !self.username.trim().is_empty() {
+            self.username = who;
+        }
+        let kept = tokens.clone();
+        self.add_signed_in(app, tokens);
+        if self.page != Page::Done {
+            let error = std::mem::take(&mut self.error);
+            (self.email, self.name, self.username) = typed;
+            self.someone_else = Some(kept);
+            self.go(Page::SomeoneElse);
+            self.error = error;
         }
     }
 
@@ -1269,6 +1308,7 @@ impl AccountSetup {
             Page::SignIn if self.waiting => self.signing_in_page(app, ui, &pass),
             Page::SignIn => self.sign_in_ended_page(app, ui, &pass),
             Page::Approval => self.approval_page(app, ui, &pass),
+            Page::SomeoneElse => self.someone_else_page(ui, &pass),
             Page::Password => self.password_page(app, ui, &mut pass),
             Page::Checking => {
                 let server = shown(self.incoming.host.trim(), 120);
@@ -1419,6 +1459,35 @@ impl AccountSetup {
             back = button(ui, tl!("Back"), false, true).clicked();
         });
         if back { Some(Action::Back) } else { (ready && (go || entered(ui, pass))).then_some(Action::Go) }
+    }
+
+    /// The owner signed in as somebody other than the address typed (#103): who, and the two
+    /// ways on. Nothing is added until they say.
+    fn someone_else_page(&mut self, ui: &mut Ui, pass: &Pass) -> Option<Action> {
+        let t = pass.t;
+        let who = self.someone_else.as_ref().map(|tokens| line(&tokens.email, LINE)).unwrap_or_default();
+        let typed = self.email.trim();
+        page(ui, &t, |ui| {
+            heading(ui, tl!("This isn't the account you typed"), &t);
+            let said = fmt(tl!("You signed in as {signedIn}, not {typed}."), &[("signedIn", &shown(&who, 120)), ("typed", &shown(typed, 120))]);
+            ui.label(RichText::new(said).font(medium(13.0)).color(t.text));
+            ui.add_space(2.0);
+            let next = fmt(
+                tl!("Sign in again and pick {typed} on the sign-in page, or set up the account you signed in as instead."),
+                &[("typed", &shown(typed, 120))],
+            );
+            note(ui, &next, t.text_dim);
+            ui.add_space(4.0);
+        });
+        problem(ui, &self.error);
+        let usable = address(&who).is_some();
+        let use_label = fmt(tl!("Use {address}"), &[("address", &shown(&who, 40))]);
+        let (mut again, mut take) = (false, false);
+        strip(ui, self.page, |ui| {
+            again = button(ui, tl!("Sign in again"), true, true).clicked();
+            take = button(ui, &use_label, false, usable).clicked();
+        });
+        if take { Some(Action::UseSignedIn) } else { (again || entered(ui, pass)).then_some(Action::Go) }
     }
 
     fn done_page(&mut self, app: &MailApp, ui: &mut Ui, pass: &Pass) -> Option<Action> {
@@ -2269,6 +2338,12 @@ mod tests {
         let asked = lookups(&mut a, Some(Ok(vec![MICROSOFT_MX])));
         let signed = sign_ins(&mut a, Some(Ok(signed_in("Noor Haddad"))));
         let synced = syncs(&mut a);
+        let jobs: Log<Option<mailcraft_model::sync::GraphMailRequest>> = Default::default();
+        let log = jobs.clone();
+        a.services.graph = Some(Box::new(move |req: crate::GraphRequest| {
+            log.lock().unwrap().push(req.mail.clone());
+            mpsc::channel().1
+        }));
         let mut h = open(a, json!({}));
         connect(&mut h, "Noor@Example.org");
         h.run_steps(4);
@@ -2279,8 +2354,8 @@ mod tests {
             let signed = signed.lock().unwrap();
             assert_eq!((signed.len(), signed[0].0.as_str(), signed[0].1.as_str()), (1, "Noor@Example.org", APP_ID));
         }
-        // The account is the only one (the nameless mailbox made way), with Microsoft's servers
-        // and the name Microsoft knows the owner by.
+        // The account is the only one (the nameless mailbox made way), kept in step through
+        // Microsoft Graph (R3), with the name Microsoft knows the owner by.
         let s = &h.state().session;
         assert_eq!(s.mailbox.accounts.len(), 1);
         let account = &s.mailbox.accounts[0];
@@ -2290,28 +2365,23 @@ mod tests {
         );
         assert_eq!(
             (account.kind, account.oauth.as_ref().map(|o| (o.provider, o.client_id.as_str()))),
-            (AccountKind::Imap, Some((OAuthProvider::Microsoft, "")))
+            (AccountKind::Microsoft, Some((OAuthProvider::Microsoft, "")))
         );
-        assert_eq!(account.incoming, Some(Server { host: "outlook.office365.com".into(), port: 993, security: Security::Tls }));
-        assert_eq!(account.outgoing, Some(Server { host: "smtp.office365.com".into(), port: 587, security: Security::StartTls }));
-        // The first download started, with the token and no password.
-        {
-            let synced = synced.lock().unwrap();
-            assert_eq!(synced.len(), 1);
-            assert_eq!((synced[0].0.id, synced[0].1.as_str(), synced[0].2.as_str()), (account.id, "tok-1", ""));
-        }
-        assert!(h.state().syncing() && !h.state().signing_in());
+        assert_eq!((account.incoming.as_ref(), account.outgoing.as_ref()), (None, None));
+        // The first download started, through Graph: no IMAP, and no password.
+        assert!(synced.lock().unwrap().is_empty());
+        assert_eq!(jobs.lock().unwrap().iter().filter_map(|mail| mail.as_ref().map(|m| m.account)).collect::<Vec<_>>(), [account.id]);
+        assert!(!h.state().signing_in());
         assert!(says(&h, "Noor@Example.org is set up") && says(&h, "Your mail is downloading now"));
         click(&mut h, "Done");
         assert_eq!(page(&h), None);
     }
 
-    /// (R3.1) With the switch for testing on, the same account is kept in step through Microsoft
-    /// Graph: signed in for Graph with its mail, no mail servers, and its first run a Graph job.
+    /// (R3.1) A Microsoft account is kept in step through Microsoft Graph: signed in for Graph
+    /// with its mail, no mail servers, and its first run a Graph job.
     #[test]
-    fn behind_the_switch_a_microsoft_account_is_kept_in_step_through_graph() {
+    fn a_microsoft_account_is_kept_in_step_through_graph() {
         let mut a = app(false);
-        a.session.graph_mail = true;
         a.services.microsoft_client_id = APP_ID.into();
         lookups(&mut a, Some(Ok(vec![MICROSOFT_MX])));
         let asked: Log<(bool, bool)> = Default::default();
@@ -2368,6 +2438,99 @@ mod tests {
         assert_eq!(page(&h), Some(Page::Choose));
         click(&mut h, "Back");
         assert_eq!(page(&h), Some(Page::Address));
+    }
+
+    /// The tokens of a sign-in as `email`.
+    fn signed_in_as(email: &str) -> SignedIn {
+        SignedIn { name: "Ada Admin".into(), email: email.into(), ..signed_in("Noor Haddad") }
+    }
+
+    /// (#103) The owner types one address and, on Microsoft's page, picks another account: the
+    /// wizard says so and adds nothing. "Sign in again" goes back to the provider's page for the
+    /// address typed (where the owner picks who signs in, every time).
+    #[test]
+    fn a_sign_in_as_somebody_else_is_asked_about_and_nothing_is_added() {
+        let mut a = app(false);
+        a.services.microsoft_client_id = APP_ID.into();
+        lookups(&mut a, Some(Ok(vec![MICROSOFT_MX])));
+        let signed = sign_ins(&mut a, Some(Ok(signed_in_as("Admin@Example.org"))));
+        let synced = syncs(&mut a);
+        let mut h = open(a, json!({}));
+        connect(&mut h, "noor@example.org");
+        h.run_steps(4);
+        assert_eq!(page(&h), Some(Page::SomeoneElse));
+        assert!(says(&h, "You signed in as Admin@Example.org, not noor@example.org."));
+        // Nothing is added, nothing is kept and nothing is downloaded.
+        assert_eq!(addresses(&h), [""]);
+        assert!(h.state().tokens.is_empty() && synced.lock().unwrap().is_empty());
+        click(&mut h, "Sign in again");
+        // Asked for the address typed again; the page asks who signs in.
+        {
+            let signed = signed.lock().unwrap();
+            assert_eq!(signed.iter().map(|(email, ..)| email.as_str()).collect::<Vec<_>>(), ["noor@example.org", "noor@example.org"]);
+        }
+        assert_eq!(page(&h), Some(Page::SomeoneElse));
+        // This time the owner picks the right account: it is added as before.
+        sign_ins(h.state_mut(), Some(Ok(signed_in_as("NOOR@EXAMPLE.ORG"))));
+        click(&mut h, "Sign in again");
+        assert_eq!(page(&h), Some(Page::Done));
+        let account = h.state().session.mailbox.accounts[0].clone();
+        assert_eq!((account.email.as_str(), account.username.as_str()), ("noor@example.org", "noor@example.org"));
+        assert!(h.state().tokens.contains_key(&account.id));
+    }
+
+    /// (#103) "Use …": the account set up is the one that signed in, by its own address and the
+    /// name Microsoft gave, so what the window shows is who it is. (An address that is another
+    /// name of the same mailbox gets there the same way.)
+    #[test]
+    fn use_sets_up_the_account_that_signed_in() {
+        let mut a = app(false);
+        a.services.microsoft_client_id = APP_ID.into();
+        lookups(&mut a, Some(Ok(vec![MICROSOFT_MX])));
+        sign_ins(&mut a, Some(Ok(signed_in_as("admin@example.org"))));
+        let synced = syncs(&mut a);
+        let jobs: Log<Option<mailcraft_model::sync::GraphMailRequest>> = Default::default();
+        let log = jobs.clone();
+        a.services.graph = Some(Box::new(move |req: crate::GraphRequest| {
+            log.lock().unwrap().push(req.mail.clone());
+            mpsc::channel().1
+        }));
+        let mut h = open(a, json!({"displayName": "Noor Haddad"}));
+        connect(&mut h, "noor@example.org");
+        h.run_steps(4);
+        assert_eq!(page(&h), Some(Page::SomeoneElse));
+        // Taken meanwhile: said on the page, which stays, for the address typed.
+        h.state_mut().execute("account.add", json!({"email": "admin@example.org"})).unwrap();
+        click(&mut h, "Use admin@example.org");
+        assert_eq!(page(&h), Some(Page::SomeoneElse));
+        assert!(says(&h, "already set up") && says(&h, "not noor@example.org"));
+        let taken = h.state().session.mailbox.accounts.iter().find(|a| a.email == "admin@example.org").map(|a| a.id).unwrap();
+        h.state_mut().execute("account.edit", json!({"id": taken, "email": "noor.old@example.org"})).unwrap();
+        click(&mut h, "Use admin@example.org");
+        assert_eq!(page(&h), Some(Page::Done));
+        assert!(says(&h, "admin@example.org is set up"));
+        let account = h.state().session.mailbox.accounts.iter().find(|a| a.email == "admin@example.org").cloned().unwrap();
+        assert_eq!((account.display_name.as_str(), account.username.as_str()), ("Ada Admin", "admin@example.org"));
+        assert!(!h.state().session.mailbox.accounts.iter().any(|a| a.email == "noor@example.org"));
+        assert_eq!(h.state().tokens.get(&account.id).map(|t| t.access.as_str()), Some("tok-1"));
+        // Its first run is through Graph (R3): nothing by IMAP.
+        assert!(synced.lock().unwrap().is_empty());
+        assert_eq!(jobs.lock().unwrap().iter().filter_map(|mail| mail.as_ref().map(|m| m.account)).collect::<Vec<_>>(), [account.id]);
+    }
+
+    /// (#103) A sign-in that doesn't say who signed in is taken as the address typed, as before.
+    #[test]
+    fn a_sign_in_that_names_nobody_adds_the_address_typed() {
+        let mut a = app(false);
+        a.services.microsoft_client_id = APP_ID.into();
+        lookups(&mut a, Some(Ok(vec![MICROSOFT_MX])));
+        sign_ins(&mut a, Some(Ok(signed_in_as(""))));
+        syncs(&mut a);
+        let mut h = open(a, json!({}));
+        connect(&mut h, "noor@example.org");
+        h.run_steps(4);
+        assert_eq!(page(&h), Some(Page::Done));
+        assert_eq!(addresses(&h), ["noor@example.org"]);
     }
 
     /// (#44) Google refuses an everyday password where 2-Step Verification is on: the page says
@@ -2730,7 +2893,8 @@ mod tests {
         {
             let (mut h, signed, synced) = signed_in_to(tenant);
             assert_eq!((page(&h), directory(&h)), (Some(Page::Done), kind), "{tenant}");
-            assert_eq!((addresses(&h), signed.lock().unwrap().len(), synced.lock().unwrap().len()), (vec!["noor@example.org".to_string()], 1, 1));
+            // (Its first run is through Graph, R3: nothing by IMAP.)
+            assert_eq!((addresses(&h), signed.lock().unwrap().len(), synced.lock().unwrap().len()), (vec!["noor@example.org".to_string()], 1, 0));
             for never in ["Show Outlook's Favorites?", "Exchange Web Services", "Not now"] {
                 assert!(!says(&h, never), "{tenant}: {never}");
             }
@@ -2759,6 +2923,7 @@ mod tests {
             Page::ApplicationId,
             Page::SignIn,
             Page::Approval,
+            Page::SomeoneElse,
             Page::Password,
             Page::Checking,
             Page::Done,
@@ -2797,7 +2962,10 @@ mod tests {
                     } else {
                         w.page = page_in_view;
                         (w.advanced, w.settings_open, w.guessed) = (true, true, hostile);
-                        w.oauth = matches!(page_in_view, Page::SignIn | Page::ApplicationId | Page::Approval).then(OAuth::default);
+                        w.oauth =
+                            matches!(page_in_view, Page::SignIn | Page::ApplicationId | Page::Approval | Page::SomeoneElse).then(OAuth::default);
+                        let who = if hostile { junk.clone() } else { "admin@example.org".to_string() };
+                        w.someone_else = (page_in_view == Page::SomeoneElse).then(|| SignedIn { email: who, name: junk.clone(), ..signed_in("") });
                         (w.service, w.approval.said) = ("Microsoft 365".into(), hostile);
                         w.approval.refused = hostile.then(|| (junk.clone(), junk.clone()));
                         (w.ended, w.approved) = (hostile.then_some(SignInEnd::TimedOut), !hostile);

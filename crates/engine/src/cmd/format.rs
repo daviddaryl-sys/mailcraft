@@ -3,7 +3,7 @@
 //!
 //! These are pure commands: they change the message being written, never the mailbox, so they
 //! are not on the mailbox's undo history. The message has its own (`compose.undo`). While a
-//! signature is open in File › Options › Signatures they work on it instead ([`Session::doc`]).
+//! signature is open in File › Signatures they work on it instead ([`Session::doc`]).
 //! Positions count characters of the body's text, a paragraph break being one.
 
 use mailcraft_model::rich::{Font, Format, ListKind, MAX_SIZE, MIN_SIZE, safe_color};

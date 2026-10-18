@@ -70,6 +70,14 @@ pub enum Place {
 pub fn show(app: &mut MailApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let picked = app.session.sel.messages.len();
+    // What showing it needs (its body, the pictures in it, a calendar part) is brought into
+    // memory first, when the mailbox keeps it on disk; the message then shows whole in this
+    // very frame. (One that can't be read says so in its text, once.)
+    if let Some(id) = app.session.sel.focus()
+        && app.session.needs_load_for_display(id)
+    {
+        let _ = app.session.load_for_display(id);
+    }
     let Some(m) = app.session.sel.focus().and_then(|id| app.session.mailbox.messages.get(&id).cloned()) else {
         let r = ui.available_rect_before_wrap();
         icons::paint(
@@ -101,6 +109,11 @@ pub fn show(app: &mut MailApp, ui: &mut Ui) {
 /// The reading pane shows the selected message with it, and a message window its own.
 pub fn show_message(app: &mut MailApp, ui: &mut Ui, m: &Arc<Message>, place: Place) {
     let ctx = ui.ctx().clone();
+    // A window shows its own copy of the message: what the mailbox keeps on disk is brought in
+    // here, and the window takes the whole message up at its next frame.
+    if place != Place::Quote && app.session.needs_load_for_display(m.id) {
+        let _ = app.session.load_for_display(m.id);
+    }
     remote::tick(app, &ctx);
     select::begin(app, ui, m, place);
     let doc = view::doc_where(&ctx, m, place, remote::available(app));
@@ -108,9 +121,44 @@ pub fn show_message(app: &mut MailApp, ui: &mut Ui, m: &Arc<Message>, place: Pla
     // Asked for: what has not come yet is sent for, while the message is on screen.
     let progress = if access == Access::Allowed { remote::want(app, &ctx, m, &doc) } else { remote::Progress::default() };
     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-    header(app, ui, m, place, |app, ui, t| remote::line(app, ui, m, &doc, access, progress, place, t));
+    header(app, ui, m, place, |app, ui, t| {
+        remote::line(app, ui, m, &doc, access, progress, place, t);
+        unreadable_line(ui, m, t);
+    });
     // A meeting that came with the message: what it is, and the ways to answer it.
     invitation::bar(app, ui, m, place);
+    // Only its headers and a preview are here yet (R3.2): say so, and why.
+    if m.unfetched {
+        let t = Tokens::get(ui.ctx());
+        let said = if app.fetching.fetching(m.id) {
+            tl!("Downloading the whole message…")
+        } else if app.fetching.offline {
+            tl!("This message isn't on this computer yet. It will download when you're online.")
+        } else {
+            tl!("Only the beginning of this message is here. The rest downloads with the next Send/Receive.")
+        };
+        egui::Frame::NONE.fill(t.ribbon).inner_margin(egui::Margin { left: 20, right: 20, top: 6, bottom: 6 }).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new(said).font(crate::theme::regular(12.0)).color(t.text_dim));
+        });
+    }
+    // Held in the Outbox (R3.4.2): what happened, and the owner's say-so to send it again.
+    if !m.held.is_empty() {
+        let t = Tokens::get(ui.ctx());
+        let id = m.id;
+        egui::Frame::NONE.fill(t.ribbon).inner_margin(egui::Margin { left: 20, right: 20, top: 6, bottom: 6 }).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                // The pane lays its header out without gaps; the words and the button need them.
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(egui::RichText::new(tl!("Held:")).font(crate::theme::regular(12.0)).strong().color(t.text));
+                ui.label(egui::RichText::new(m.held.as_str()).font(crate::theme::regular(12.0)).color(t.text_dim));
+                if ui.button(tl!("Send Again")).clicked() {
+                    let _ = app.run("mail.sendAgain", serde_json::json!({"id": id}));
+                }
+            });
+        });
+    }
     // The body gets the part of the pane that can be seen, whatever was laid out above it: a
     // header too wide for a narrow pane must not make the text run out of sight with it.
     let room = ui.available_rect_before_wrap().intersect(ui.clip_rect());
@@ -120,6 +168,44 @@ pub fn show_message(app: &mut MailApp, ui: &mut Ui, m: &Arc<Message>, place: Pla
             egui::Frame::NONE.inner_margin(egui::Margin { left: 20, right: 20, top: 12, bottom: 24 }).show(ui, |ui| {
                 view::show(app, ui, m, place, access);
             });
+        });
+    });
+}
+
+/// Whether `m`'s subject, sender or text holds U+FFFD, the mark a reader leaves for a character
+/// it couldn't read (bytes that aren't in the character set the message names, or no name for
+/// one that isn't UTF-8 or Windows-1252).
+pub(crate) fn has_unreadable(m: &Message) -> bool {
+    const MARK: char = char::REPLACEMENT_CHARACTER;
+    [m.subject.as_str(), m.from.name.as_str(), m.from.email.as_str(), m.body.text.as_str(), m.body.html.as_deref().unwrap_or("")]
+        .iter()
+        .any(|text| text.contains(MARK))
+}
+
+/// The line above a message that holds a character that couldn't be read ([`has_unreadable`]):
+/// why there is a � in it. One line for the whole message, so that no � needs a word of its own.
+/// Looked for once per message and kept, not every frame: a body can be long.
+fn unreadable_line(ui: &mut Ui, m: &Message, t: &Tokens) {
+    let key = egui::Id::new(("mailcraft-unreadable", m.id, m.subject.len(), m.body.text.len(), m.body.html.as_ref().map_or(0, String::len)));
+    let unreadable = match ui.ctx().data(|d| d.get_temp::<bool>(key)) {
+        Some(kept) => kept,
+        None => {
+            let found = has_unreadable(m);
+            ui.ctx().data_mut(|d| d.insert_temp(key, found));
+            found
+        }
+    };
+    if !unreadable {
+        return;
+    }
+    remote::notice(t.blue, t).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 2.0);
+            let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+            icons::paint(ui.painter(), r.shrink(1.0), "info", t.text, t.blue);
+            let said = tl!("Some characters in this message couldn't be read: the sender's program didn't say properly how they were written.");
+            ui.add(egui::Label::new(egui::RichText::new(said).font(regular(11.5)).color(t.text)).wrap());
         });
     });
 }
@@ -161,6 +247,8 @@ fn quote_message(app: &MailApp, ctx: &egui::Context) -> Option<Arc<Message>> {
     m.body = mailcraft_model::Body { text: quote.text.clone(), html: Some(quote.html.clone()) };
     // A forward carries the original's attachments itself, its pictures among them.
     m.attachments = pictures.clone();
+    // Its body is the quote's, whole: nothing of it waits on disk.
+    m.kept = None;
     let m = Arc::new(m);
     ctx.data_mut(|d| d.insert_temp(key, m.clone()));
     Some(m)
@@ -341,11 +429,13 @@ fn attachments(app: &mut MailApp, ui: &mut Ui, m: &Message, t: &Tokens) {
             icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 17.0, r.center().y), vec2(18.0, 18.0)), "attach", t.icon, t.accent);
             paint_clipped(ui.painter(), pos2(r.min.x + 34.0, r.min.y + 13.0), name_w + 4.0, &a.name, regular(12.0), t.text);
             ui.painter().text(pos2(r.min.x + 34.0, r.min.y + 27.0), Align2::LEFT_CENTER, a.size_label(), regular(10.5), t.text_dim);
-            let resp = resp.on_hover_text(crate::i18n::fmt(tl!("Save {name}"), &[("name", &a.name)]));
-            if resp.clicked() {
-                let _ = app.run("mail.saveAttachment", json!({"id": m.id, "index": index}));
+            // Double-click opens it, as in Outlook; its menu opens or saves it.
+            let resp = resp.on_hover_text(crate::i18n::fmt(tl!("Double-click to open {name}; right-click to save it"), &[("name", &a.name)]));
+            if resp.double_clicked() {
+                let _ = app.run("mail.openAttachment", json!({"id": m.id, "index": index}));
             }
             resp.context_menu(|ui| {
+                crate::widgets::mi(ui, app, "Open", "mail.openAttachment", json!({"id": m.id, "index": index}));
                 crate::widgets::mi(ui, app, "Save As…", "mail.saveAttachment", json!({"id": m.id, "index": index}));
                 crate::widgets::mi(ui, app, "Remove Attachment", "mail.removeAttachment", json!({"id": m.id, "index": index}));
             });

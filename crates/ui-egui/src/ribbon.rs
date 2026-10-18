@@ -19,6 +19,8 @@ const TAB_H: f32 = 30.0;
 const TAB_SIZE: f32 = 13.333;
 /// The gap between the ribbon and the panes under it.
 const SHEET_GAP: f32 = 7.0;
+/// The gap between the tabs and the ribbon.
+const TOP_GAP: f32 = 5.0;
 
 /// The simplified row: the band's height and a button's.
 const BAND_H: f32 = 48.0;
@@ -639,7 +641,13 @@ fn send_receive(app: &MailApp) -> Tab {
     };
     Tab {
         groups: vec![
-            g("Send & Receive", vec![Item::big("sync", "Send/Receive\nAll Folders", "ui.sync", no()).at(0, 1)]),
+            g(
+                "Send & Receive",
+                vec![
+                    Item::big("sync", "Send/Receive\nAll Folders", "ui.sync", no()).at(0, 1),
+                    Item::big("syncProgress", "Show\nProgress", "ui.dialog", json!({"name": "syncProgress"})).key("sync.progress").at(0, 3),
+                ],
+            ),
             g(
                 "Accounts",
                 vec![
@@ -1372,16 +1380,19 @@ fn classic_big(app: &mut MailApp, ui: &mut Ui, item: &Item) {
     match (&item.command, item.menu) {
         (Some((command, params)), _) => {
             let on = app.enabled(command);
-            let resp = big_frame(ui, item.icon, label, on, item.checked, false);
+            let (resp, text) = big_frame(ui, item.icon, label, on, item.checked, false);
             app.hit.add("ribbon", hit_id(item.key), resp.rect);
+            app.hit.add("ribbonLabel", hit_id(item.key), text);
             let resp = command_tooltip(app, resp, &item.tip_text(), command);
             if resp.clicked() && on {
                 let _ = app.run(command, params.clone());
             }
         }
         (None, Some(menu)) => {
-            let resp = big_frame(ui, item.icon, label, true, false, true).on_hover_text(item.tip_text());
+            let (resp, text) = big_frame(ui, item.icon, label, true, false, true);
+            let resp = resp.on_hover_text(item.tip_text());
             app.hit.add("ribbon", hit_id(item.key), resp.rect);
+            app.hit.add("ribbonLabel", hit_id(item.key), text);
             egui::Popup::menu(&resp).show(|ui| {
                 ui.set_min_width(200.0);
                 menu_contents(ui, app, menu);
@@ -1477,6 +1488,7 @@ pub fn show(app: &mut MailApp, ui: &mut Ui) {
                     let text_w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(shown.to_string(), semibold(TAB_SIZE), t.text).size().x);
                     let w = text_w + 24.0;
                     let (r, resp) = ui.allocate_exact_size(vec2(w, TAB_H), Sense::click());
+                    app.hit.add("ribbonTab", hit_id(tab), r);
                     if resp.hovered() && !active {
                         ui.painter().rect_filled(r.shrink2(vec2(2.0, 4.0)), 4.0, t.hover);
                     }
@@ -1514,9 +1526,9 @@ pub fn show(app: &mut MailApp, ui: &mut Ui) {
         Mode::Classic => (CONTENT_H + LABEL_H + 10.0, 4.0),
         Mode::Simplified => (BAND_H, (BAND_H - BUTTON_H) / 2.0),
     };
-    let margin = egui::Margin { left: 8, right: (16.0 + MODE_W) as i8, top: edge as i8, bottom: (edge + SHEET_GAP) as i8 };
+    let margin = egui::Margin { left: 8, right: (16.0 + MODE_W) as i8, top: (edge + TOP_GAP) as i8, bottom: (edge + SHEET_GAP) as i8 };
     egui::Panel::top("ribbon")
-        .exact_size(height + SHEET_GAP)
+        .exact_size(height + TOP_GAP + SHEET_GAP)
         .show_separator_line(false)
         .frame(egui::Frame::NONE.fill(t.tab_strip).inner_margin(margin))
         .show(ui, |ui| {
@@ -1579,6 +1591,35 @@ mod tests {
         let mut app = MailApp::new(Session::at(mailcraft_engine::sample::mailbox(NOW, 0), NOW, 0), Services::default());
         app.autosave = false;
         app
+    }
+
+    /// A run starts on Home, and File opens on Info every time, as in Outlook: where the owner
+    /// last was is neither kept in the preferences nor while File is closed (#119).
+    #[test]
+    fn the_ribbon_opens_on_home_and_file_on_info() {
+        let mut a = app();
+        a.execute("ui.tab", json!({"tab": "View"})).unwrap();
+        a.execute("ui.backstage", json!({"value": true, "page": "options"})).unwrap();
+        let saved: crate::UiState = serde_json::from_value(serde_json::to_value(a.prefs()).unwrap()).unwrap();
+        let mut b = app();
+        b.apply_prefs(saved);
+        assert_eq!((b.ui.tab.as_str(), b.ui.backstage_page.as_str(), b.ui.backstage), ("Home", "info", false));
+        // Within a run: a tab stays chosen, File's page doesn't once File is closed.
+        b.execute("ui.tab", json!({"tab": "View"})).unwrap();
+        assert_eq!(b.ui.tab, "View");
+        b.execute("ui.backstage", json!({"value": true, "page": "options"})).unwrap();
+        assert_eq!(b.ui.backstage_page, "options");
+        // Another page while it is open is kept.
+        b.execute("ui.backstage", json!({"value": true, "page": "signatures"})).unwrap();
+        assert_eq!(b.ui.backstage_page, "signatures");
+        for open in [json!({"value": true}), json!({})] {
+            b.execute("ui.backstage", json!({"value": false})).unwrap();
+            assert_eq!(b.execute("ui.backstage", open).unwrap()["page"], "info");
+        }
+        b.execute("ui.backstage", json!({"value": true, "page": "options"})).unwrap();
+        b.execute("ui.tab", json!({"tab": "Home"})).unwrap();
+        b.execute("ui.tab", json!({"tab": "File"})).unwrap();
+        assert_eq!((b.ui.backstage, b.ui.backstage_page.as_str()), (true, "info"));
     }
 
     fn window(app: MailApp, width: f32) -> Window {
@@ -1989,6 +2030,43 @@ mod tests {
         // View lists it too.
         harness.state_mut().run("ui.tab", json!({"tab": "View"})).unwrap();
         assert!(describe(harness.state()).items().any(|item| item.menu == Some(Menu::RibbonLayout)));
+    }
+
+    /// #123: there is room between the tabs and the ribbon in both layouts, and in the classic one
+    /// between the lowest line of a large button's label and the group's name under it.
+    #[test]
+    fn the_ribbon_has_room_under_the_tabs_and_over_the_group_names() {
+        let mut harness = window(app(), 1600.0);
+        for mode in ["classic", "simplified"] {
+            harness.state_mut().execute("ui.ribbonMode", json!({"value": mode})).unwrap();
+            for (name, commands) in every_tab() {
+                for (command, params) in commands {
+                    harness.state_mut().run(command, params).unwrap();
+                }
+                harness.run_steps(3);
+                let name = format!("{name} ({mode})");
+                let app = harness.state();
+                let band = app.hit.rect("ribbonBand", 0).unwrap();
+                let strip = app.hit.rect("ribbonTab", hit_id("Home")).unwrap();
+                assert!(band.min.y - strip.max.y >= 4.0, "{name}: tabs end at {}, the ribbon starts at {}", strip.max.y, band.min.y);
+                if mode != "classic" {
+                    continue;
+                }
+                let mut checked = 0;
+                for group in &describe(app).groups {
+                    let Some(title) = app.hit.rect("ribbonGroup", hit_id(group.title)) else { continue };
+                    assert!(title.max.y <= band.max.y - 2.0, "{name}: {} at {title:?} in {band:?}", group.title);
+                    for item in group.items.iter().filter(|item| item.size == Size::Big) {
+                        let label = app.hit.rect("ribbonLabel", hit_id(item.key)).unwrap_or_else(|| panic!("{name}: {} has no label", item.key));
+                        let gap = title.min.y - label.max.y;
+                        // 2 pt, not 4: Windows draws the label half a point taller than Linux does.
+                        assert!(gap >= 2.0, "{name}: {}'s label ends {gap} over {}", item.key, group.title);
+                        checked += 1;
+                    }
+                }
+                assert!(checked > 0 || name.contains("Help"), "{name}: no large buttons were measured");
+            }
+        }
     }
 
     /// The classic layout is what it was: every control in its group, large buttons the height of

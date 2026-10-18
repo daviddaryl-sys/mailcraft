@@ -1,5 +1,5 @@
 # Changes to sync, the store, sign-in and secrets are reviewed by a person before they land
-# (docs/specs/roadmap-reset.md, "How the work is done"; plan step R1.6).
+# (roadmap reset, step R1.6).
 /crates/net/ @benandez
 /crates/proto/ @benandez
 /crates/engine/src/store.rs @benandez

@@ -1,6 +1,7 @@
 //! MailCraft vCard: contacts as vCard text (`.vcf` files).
 //!
-//! [`parse`] reads vCard 2.1, 3.0 and 4.0, one card or many in a text; [`write()`] writes vCard 3.0,
+//! [`parse`] reads vCard 2.1, 3.0 and 4.0, one card or many in a text ([`parse_bytes`] in a file,
+//! each value in its own `CHARSET`); [`write()`] writes vCard 3.0,
 //! the version every address book reads.
 //!
 //! Input is hostile. Nothing here panics on any text: line lengths and counts are capped, and what
@@ -14,5 +15,5 @@ mod tests;
 mod text;
 mod write;
 
-pub use read::parse;
+pub use read::{parse, parse_bytes};
 pub use write::write;

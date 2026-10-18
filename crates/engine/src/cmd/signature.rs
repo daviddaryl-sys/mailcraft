@@ -20,31 +20,31 @@ const MAX_SIGNATURES: usize = 100;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        CommandSpec::new("signature.set", "Signatures", "File › Options", set).params(
+        CommandSpec::new("signature.set", "Signatures", "File › Signatures", set).params(
             r#"{"name": string, "text"?: string (plain text) | "body"?: RichText | "html"?: string (pasted HTML, reduced to the set; pictures in it are not taken), "default"?: bool (use it for this account's new messages, and replies and forwards), "account"?: number} — makes the signature or replaces its text"#,
         ),
-        CommandSpec::new("signature.remove", "Delete Signature", "File › Options", remove).params(r#"{"name": string}"#),
-        CommandSpec::new("signature.rename", "Rename Signature", "File › Options", rename).params(r#"{"name": string, "to": string}"#),
-        CommandSpec::new("signature.defaults", "Choose Default Signature", "File › Options", defaults).params(
+        CommandSpec::new("signature.remove", "Delete Signature", "File › Signatures", remove).params(r#"{"name": string}"#),
+        CommandSpec::new("signature.rename", "Rename Signature", "File › Signatures", rename).params(r#"{"name": string, "to": string}"#),
+        CommandSpec::new("signature.defaults", "Choose Default Signature", "File › Signatures", defaults).params(
             r#"{"account"?: number (default: the default account), "new"?: string ("" for none), "reply"?: string (replies and forwards; "" for none)}"#,
         ),
-        CommandSpec::new("signature.picture.add", "Insert Picture", "File › Options › Signatures", picture_add).params(
+        CommandSpec::new("signature.picture.add", "Insert Picture", "File › Signatures", picture_add).params(
             r#"{"name": string (the signature), "data"?: base64 | "path"?: string (PNG, JPEG or GIF; never a web address), "file"?: string (its name), "alt"?: string, "at"?: number (a position in the text; default: the start)} — answers the picture's id"#,
         ),
-        CommandSpec::new("signature.picture.set", "Picture Size and Description", "File › Options › Signatures", picture_set)
+        CommandSpec::new("signature.picture.set", "Picture Size and Description", "File › Signatures", picture_set)
             .params(r#"{"name": string, "id": number, "width"?: number (pixels, at most 600) | null (its own), "alt"?: string}"#),
-        CommandSpec::new("signature.picture.remove", "Remove Picture", "File › Options › Signatures", picture_remove)
+        CommandSpec::new("signature.picture.remove", "Remove Picture", "File › Signatures", picture_remove)
             .params(r#"{"name": string, "id": number}"#),
-        CommandSpec::new("signature.layout", "Picture Layout", "File › Options › Signatures", layout)
+        CommandSpec::new("signature.layout", "Picture Layout", "File › Signatures", layout)
             .params(r#"{"name": string, "value": "inline"|"pictureLeft"|"pictureAbove"}"#),
-        CommandSpec::new("signature.details", "Create from Details", "File › Options › Signatures", details).params(
+        CommandSpec::new("signature.details", "Create from Details", "File › Signatures", details).params(
             r#"{"name": string, "details": {"name"?, "title"?, "organisation"?, "phone"?, "mobile"?, "email"?, "website"?, "address"?: string}, "restart"?: bool (lay it out again after it was edited by hand)} — lays the signature out from the details (the logo is its first picture); after a hand edit only keeps them, unless restart"#,
         ),
-        CommandSpec::new("signature.open", "Edit Signature", "File › Options › Signatures", open)
+        CommandSpec::new("signature.open", "Edit Signature", "File › Signatures", open)
             .pure()
             .params(r#"{"name": string} — the editing commands work on it until signature.close"#),
-        CommandSpec::new("signature.save", "Save Signature", "File › Options › Signatures", save).when(needs_edit),
-        CommandSpec::new("signature.close", "Close Signature", "File › Options › Signatures", close)
+        CommandSpec::new("signature.save", "Save Signature", "File › Signatures", save).when(needs_edit),
+        CommandSpec::new("signature.close", "Close Signature", "File › Signatures", close)
             .pure()
             .params(r#"{"discard"?: bool} — refused while it has changes, unless discard"#)
             .when(needs_edit),

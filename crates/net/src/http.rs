@@ -20,8 +20,9 @@ use crate::transport::{self, Service};
 
 /// Largest answer body taken, unless the one who asks says otherwise ([`Request::max_body`]).
 pub(crate) const MAX_BODY: usize = 64 * 1024;
-/// Largest answer body anyone may ask for.
-pub(crate) const MAX_LARGE_BODY: usize = 16 * 1024 * 1024;
+/// Largest answer body anyone may ask for: a whole message of a Microsoft account (Microsoft's
+/// own limit is 150 MB). Each caller asks for no more than its own answers need (#175).
+pub(crate) const MAX_LARGE_BODY: usize = 160 * 1024 * 1024;
 /// Most bytes the answer's status line and headers may take, and most lines.
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_HEAD_LINES: usize = 200;
@@ -140,8 +141,9 @@ pub(crate) struct Request<'a> {
     /// `GET`, `POST`, `PATCH`, `DELETE`.
     pub(crate) method: &'a str,
     pub(crate) headers: &'a [(&'a str, &'a str)],
-    /// Text (JSON, base64), with the `Content-Type` among the headers.
-    pub(crate) body: Option<&'a str>,
+    /// Text (JSON, base64) or bytes (a piece of an upload), with the `Content-Type` among the
+    /// headers.
+    pub(crate) body: Option<&'a [u8]>,
     /// How long connecting may take, and the answer. A large body is given more for going up.
     pub(crate) patience: Duration,
     /// Largest answer body taken (never more than [`MAX_LARGE_BODY`]).
@@ -272,7 +274,7 @@ pub(crate) fn post_form(url: &Url, fields: &[(&str, &str)], patience: Duration) 
 
 /// One request on a connection of its own, and no more of the answer than the usual.
 fn send(url: &Url, method: &str, headers: &[(&str, &str)], body: Option<&str>, patience: Duration) -> Result<Answer, NetError> {
-    let reply = request(url, &Request { method, headers, body, patience, max_body: MAX_BODY })?;
+    let reply = request(url, &Request { method, headers, body: body.map(str::as_bytes), patience, max_body: MAX_BODY })?;
     Ok(Answer { status: reply.status, body: reply.body })
 }
 
@@ -289,7 +291,7 @@ pub(crate) fn request(url: &Url, request: &Request<'_>) -> Result<Reply, NetErro
     let server = Server { host: url.host.clone(), port: url.port, security: if url.secure { Security::Tls } else { Security::None } };
     let (mut stream, _) = transport::open_within(&server, Service::Http, request.patience, request.patience)?;
     let started = Instant::now();
-    let body = request.body.unwrap_or("");
+    let body: &[u8] = request.body.unwrap_or_default();
     let allowance = Duration::from_secs(u64::try_from(body.len() / MIN_UPLOAD_RATE).unwrap_or(u64::MAX));
     let patience = request.patience.saturating_add(allowance);
     // The address was checked when it was read: nothing in it can end the line early.
@@ -307,12 +309,13 @@ pub(crate) fn request(url: &Url, request: &Request<'_>) -> Result<Reply, NetErro
     head.push_str("Connection: close\r\n\r\n");
     // A header or a body may carry secrets: nothing of the request is logged.
     if body.len() <= UPLOAD_CHUNK {
-        head.push_str(body);
-        write_all(&mut stream, head.as_bytes())?;
+        let mut all = head.into_bytes();
+        all.extend_from_slice(body);
+        write_all(&mut stream, &all)?;
     } else {
         write_all(&mut stream, head.as_bytes())?;
         // A server that takes its time over every piece is not waited on for ever.
-        for piece in body.as_bytes().chunks(UPLOAD_CHUNK) {
+        for piece in body.chunks(UPLOAD_CHUNK) {
             if started.elapsed() >= patience {
                 return Err(too_slow());
             }
@@ -840,6 +843,26 @@ mod tests {
             assert!(reply.location.is_none());
         }
     }
+
+    #[test]
+    fn an_answer_over_16_mb_comes_whole_to_one_who_asks_for_it() {
+        use crate::fake::FakeHttp;
+
+        // A whole message of a Microsoft account may be larger than 16 MB (#175).
+        let size = 17 * 1024 * 1024 + 3;
+        let mut answer = format!("HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n").into_bytes();
+        answer.resize(answer.len() + size, b'm');
+        let server = FakeHttp::answering(answer);
+        let at = url(&server.url("/v1.0/me/messages/AAMk/$value"));
+        let ask = |max_body: usize| request(&at, &Request { method: "GET", headers: &[], body: None, patience: SOON, max_body });
+        assert_eq!(ask(MAX_LARGE_BODY).unwrap().body.len(), size);
+        assert_eq!(ask(size).unwrap().body.len(), size);
+        assert_eq!(ask(usize::MAX).unwrap().body.len(), size, "within the ceiling");
+        // Everyone else still has their own limit.
+        assert!(matches!(ask(16 * 1024 * 1024), Err(NetError::Proto(ProtoError::Protocol(why))) if why.contains("longer than 16384 KB")));
+        assert!(matches!(ask(MAX_BODY), Err(NetError::Proto(ProtoError::Protocol(why))) if why.contains("longer than 64 KB")));
+    }
+
     #[test]
     fn when_to_come_back_is_kept() {
         let reply = |headers: &str| {
@@ -861,8 +884,9 @@ mod tests {
         let server = FakeHttp::answering(json_answer("200 OK", &"y".repeat(3 * MAX_BODY)));
         let at = url(&server.url("/v1.0/me/sendMail?x=1"));
         let headers = [("Authorization", "Bearer tok\r\nen"), ("Content-Type", "text/plain"), ("Bad Name", "x"), ("", "y")];
-        let ask =
-            |method: &str, body: Option<&str>, max_body: usize| request(&at, &Request { method, headers: &headers, body, patience: SOON, max_body });
+        let ask = |method: &str, body: Option<&str>, max_body: usize| {
+            request(&at, &Request { method, headers: &headers, body: body.map(str::as_bytes), patience: SOON, max_body })
+        };
 
         let reply = ask("POST", Some("aGVsbG8="), 4 * MAX_BODY).unwrap();
         assert_eq!((reply.status, reply.body.len(), reply.retry_after), (200, 3 * MAX_BODY, None));

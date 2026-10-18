@@ -118,7 +118,17 @@ fn list(s: &mut Session, _: &Value) -> CmdResult {
 /// Run every enabled rule on the messages of `folder`; answers how many messages a rule acted on.
 fn run_on(s: &mut Session, folder: Id) -> usize {
     let ids: Vec<Id> = s.mailbox.messages_in(folder).map(|m| m.id).collect();
-    ids.into_iter().filter(|id| !s.mailbox.apply_rules(*id).is_empty()).count()
+    // A rule that reads the body reads it whole: one kept on disk is brought in first (one that
+    // can't be read says so in its place, and is matched as that).
+    let reads_bodies = s.mailbox.rules.iter().any(|r| r.enabled && r.conditions.iter().any(|c| matches!(c, Condition::BodyContains(_))));
+    ids.into_iter()
+        .filter(|id| {
+            if reads_bodies {
+                let _ = s.load_where(*id, |_| false);
+            }
+            !s.mailbox.apply_rules(*id).is_empty()
+        })
+        .count()
 }
 
 fn run(s: &mut Session, v: &Value) -> CmdResult {

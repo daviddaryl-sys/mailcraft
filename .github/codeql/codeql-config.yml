@@ -1,0 +1,15 @@
+# CodeQL: what code scanning reads. Test-only code is left out: its fixed clocks, made-up
+# passwords and assertion messages are not production and were flagged as if they were.
+# Rust is analysed with `build-mode: none`, for which `paths-ignore` is honoured.
+#
+# Used by default setup through the `github-codeql-config-file` repository property
+# (the value: this file's path), or by an advanced workflow's `config-file` input.
+name: MailCraft CodeQL
+
+paths-ignore:
+  - "**/tests/**"
+  - "**/tests.rs"
+  - "**/*_tests.rs"
+  - "**/examples/**"
+  # The desktop app's whole-way tests (`#[cfg(test)] mod …_flow;` in `apps/mailcraft/src/main.rs`).
+  - "apps/mailcraft/src/*_flow.rs"

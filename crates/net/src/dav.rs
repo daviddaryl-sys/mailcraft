@@ -101,7 +101,13 @@ impl Client {
             headers.extend_from_slice(extra);
             let answer = http::request(
                 &url,
-                &http::Request { method, headers: &headers, body, patience: Duration::from_secs(40), max_body: http::MAX_LARGE_BODY },
+                &http::Request {
+                    method,
+                    headers: &headers,
+                    body: body.map(str::as_bytes),
+                    patience: Duration::from_secs(40),
+                    max_body: http::MAX_LARGE_BODY,
+                },
             )
             .map_err(|_| "DAV connection failed (network, TLS, timeout or response limit)".to_string())?;
             let redirect = matches!(answer.status, 301 | 302 | 307 | 308) || (answer.status == 303 && method == "GET");

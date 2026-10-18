@@ -184,6 +184,10 @@ pub(crate) fn corpus_messages() -> Vec<(&'static str, Message)> {
                 corpus::BUILT_NEWSLETTER,
             ),
         ),
+        (
+            "access digest",
+            html_message(31, ("Bellweather Directory", "directory@bellweather.example"), "Your weekly access digest", corpus::ACCESS_DIGEST),
+        ),
     ];
     // A file that is really attached, next to the pictures shown in place.
     if let Some((_, m)) = out.get_mut(4) {
@@ -2334,7 +2338,9 @@ fn a_copy_reads_like_the_message() {
         // A picture that is not shown is what it says it shows; one that is shown is nothing.
         assert!(news.contains("\nTwo walkers on a ridge at first light\nAutumn on the ridge\n") && news.contains("\nPhotos Films Journal\n"));
         let shots = copy("screenshots", 820.0);
-        assert!(shots.contains("would not paste:\nLog excerpt\nAnd this one") && shots.contains("anything:\nDamaged capture\n"));
+        // A picture in a line of text stands in that line, and is copied in it.
+        assert!(shots.contains("would not paste: Log excerpt\nAnd this one"), "{shots}");
+        assert!(shots.contains("anything: Damaged capture\n"), "{shots}");
         assert!(shots.contains("when I pick CSV:\n\nThe Delimiter box is empty") && !shots.contains("Picture"), "{shots}");
         // A plain-text message comes back as it was written, less the marks of its quotes.
         let plain = copy("plain thread", 820.0);
@@ -3395,4 +3401,116 @@ fn a_wide_pane_is_filled() {
     harness.run_steps(8);
     let width = super::view::kept_at(&harness.ctx, Place::Pane, id, |laid, _| laid.width()).unwrap();
     assert!(width > super::MAX_BODY_WIDTH + 400.0, "{width}");
+}
+
+// ---- #150: a centred column, tiles, lines of pictures ----
+
+/// The middle of a thing, up and down.
+fn middle(item: &Item) -> f32 {
+    item.rect.center().y
+}
+
+#[test]
+fn a_centred_digest_keeps_its_column_its_tiles_and_its_lines() {
+    let m = corpus_message("access digest");
+    for dark in [false, true] {
+        in_frame(dark, |ctx| {
+            let laid = lay_out(ctx, &m, 1000.0);
+            check(&laid, &Tokens::get(ctx), "access digest");
+            assert_eq!(laid.stats.stacked, 0, "{:?}", laid.stats);
+            // The 600-pixel column stands in the middle of the pane, and no wider.
+            let intro = find(&laid, "Here is what happened");
+            assert!(intro.rect.width() <= 600.0 && ((intro.rect.min.x + intro.rect.max.x) / 2.0 - 500.0).abs() < 1.5, "{:?}", intro.rect);
+            // Each tile's number has its icon beside it, on its middle, whichever way it is written.
+            let pictures = shown_pictures(&laid);
+            for number in ["12", "3", "7", "2"] {
+                let n = find_exact(&laid, number);
+                let icon = pictures
+                    .iter()
+                    .min_by(|a, b| a.rect.center().distance(n.rect.center()).total_cmp(&b.rect.center().distance(n.rect.center())))
+                    .unwrap();
+                assert!((middle(icon) - middle(n)).abs() < 2.0, "{number}: {:?} beside {:?}", icon.rect, n.rect);
+                let apart = (n.rect.min.x - icon.rect.max.x).max(icon.rect.min.x - n.rect.max.x);
+                assert!((-0.5..40.0).contains(&apart), "{number}: {:?} beside {:?}", icon.rect, n.rect);
+            }
+            // The footer's pictures: two lines of three, side by side, each line centred.
+            let small: Vec<&&Item> = pictures.iter().filter(|i| (i.rect.width() - 20.0).abs() < 0.5).collect();
+            assert_eq!(small.len(), 6, "{small:?}");
+            for line in small.chunks(3) {
+                assert!(line.iter().all(|i| (i.rect.min.y - line[0].rect.min.y).abs() < 0.5), "{line:?}");
+                assert!(line.windows(2).all(|w| w[1].rect.min.x > w[0].rect.max.x), "{line:?}");
+                let centre = (line[0].rect.min.x + line[2].rect.max.x) / 2.0;
+                assert!((centre - 500.0).abs() < 2.0, "{line:?}");
+            }
+            // The table of roles: the long cells wrap in the share they ask for, and every cell
+            // of the ruled rows has the same room round it.
+            let long = find(&laid, "Privileged authentication");
+            let count = find(&laid, "5 activations");
+            assert!(long.rect.max.x <= count.rect.min.x + 0.5 && long.rect.height() > 30.0, "{:?} {:?}", long.rect, count.rect);
+            assert!((find(&laid, "Security reader").rect.min.x - long.rect.min.x).abs() < 0.5);
+            assert!((find(&laid, "3 activations").rect.max.x - count.rect.max.x).abs() < 0.5);
+        });
+    }
+}
+
+#[test]
+fn a_row_of_small_pictures_stays_a_row_where_it_fits() {
+    let icons: String = (0..6)
+        .map(|i| format!("<td style='padding:0 4px'><a href='https://social.example/{i}'><img src='cid:tick-16@quillon.example' width='24' height='24' alt='Link {i}'></a></td>"))
+        .collect();
+    let html = format!("<table align='center' role='presentation'><tr>{icons}</tr></table>");
+    let m = html_message(50, ("Digest", "digest@bellweather.example"), "Icons", &html);
+    in_frame(false, |ctx| {
+        // Six columns in 400 points: narrow, but what is in them fits.
+        let laid = lay_out(ctx, &m, 400.0);
+        assert_eq!(laid.stats.stacked, 0);
+        let pictures = shown_pictures(&laid);
+        assert_eq!(pictures.len(), 6);
+        assert!(pictures.iter().all(|p| (p.rect.min.y - pictures[0].rect.min.y).abs() < 0.5), "{pictures:?}");
+        // Where they don't fit, they are stacked as before.
+        let laid = lay_out(ctx, &m, 100.0);
+        assert_eq!(laid.stats.stacked, 1);
+    });
+}
+
+#[test]
+fn a_picture_and_text_in_one_line_go_on_lines_of_their_own_when_short_of_room() {
+    let html = "<p style='text-align:center'><img src='cid:quillon-mark@quillon.example' width='32' height='32' alt=''> Bellweather Directory, the weekly digest</p>";
+    let m = html_message(51, ("Digest", "digest@bellweather.example"), "Logo", html);
+    in_frame(false, |ctx| {
+        let wide = lay_out(ctx, &m, 600.0);
+        let (logo, name) = (shown_pictures(&wide)[0].rect, find(&wide, "Bellweather Directory").rect);
+        assert!((logo.center().y - name.center().y).abs() < 1.0 && logo.max.x < name.min.x, "{logo:?} {name:?}");
+        assert!(((logo.min.x + name.max.x) / 2.0 - 300.0).abs() < 2.0, "the line is centred: {logo:?} {name:?}");
+        // Too narrow for both: the picture over the text, as before.
+        let narrow = lay_out(ctx, &m, 120.0);
+        let (logo, name) = (shown_pictures(&narrow)[0].rect, find(&narrow, "Bellweather").rect);
+        assert!(logo.max.y <= name.min.y, "{logo:?} {name:?}");
+    });
+}
+
+/// #180: a message holding U+FFFD, where a character couldn't be read, says why in one line above
+/// it, whether the mark is in its subject, its sender or its text; one without says nothing.
+#[test]
+fn a_character_that_couldnt_be_read_is_explained_once() {
+    const SAID: &str = "Some characters in this message couldn't be read";
+    let clean = message(0, ("Mila Horvat", "mila@example.org"), "Gvožđe", None, "We’ve met – twice.".into());
+    let marked = [
+        message(1, ("Mila Horvat", "mila@example.org"), "Gvo\u{fffd}\u{fffd}e", None, "Plain.".into()),
+        message(2, ("Mila Horvat\u{fffd}", "mila@example.org"), "Hello", None, "Plain.".into()),
+        message(3, ("Mila Horvat", "mila@example.org"), "Hello", None, "We\u{fffd}ve met \u{fffd} twice.".into()),
+        message(4, ("Mila Horvat", "mila@example.org"), "Hello", Some("<p>We\u{fffd}ve met</p>".into()), String::new()),
+    ];
+    assert!(!super::has_unreadable(&clean));
+    for m in &marked {
+        assert!(super::has_unreadable(m), "{:?}", m.subject);
+    }
+    let (app, ids) = app_with(std::iter::once(clean).chain(marked).collect());
+    let mut harness = window(app, (1100.0, 700.0));
+    select(&mut harness, ids[0]);
+    assert!(!says(&harness, SAID));
+    for id in &ids[1..] {
+        select(&mut harness, *id);
+        assert_eq!(harness.query_all_by_label_contains(SAID).count(), 1, "message {id}");
+    }
 }

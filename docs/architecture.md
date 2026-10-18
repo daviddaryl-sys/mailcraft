@@ -1,6 +1,6 @@
 # MailCraft architecture
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-15 · **Change:** minor (R3.1: a Microsoft account kept in step through Graph behind a switch for testing, server ids, `graph::pace`; the Secret Service on Linux and FreeBSD behind `Services::secrets`; `StoreTrouble`; Exchange Web Services removed: the Favorites of Outlook are read through Microsoft Graph alone, and there is no choice of a way) · **Target:** Microsoft Outlook (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-18 · **Change:** minor (`charset`, L0: one decoder of character sets for mail and vCard files, #180; R6: the mailbox file is a log of records, format 3, `store_index.rs`; a damaged later save stops the reading there, a damaged item of the first save costs only itself, and `file.open` says so; files kept aside are never removed and keep their content from the sweep; no citations of private decision records; R3.7: the switch from IMAP to Graph, no switch for testing; quitting on macOS through craft-quit, the first crate from craft-libs, for the apps alone; cargo-deny, pinned actions, zizmor, Scorecard, the threat model; R3.1: a Microsoft account kept in step through Graph behind a switch for testing, server ids, `graph::pace`; the Secret Service on Linux and FreeBSD behind `Services::secrets`; `StoreTrouble`; Exchange Web Services removed: the Favorites of Outlook are read through Microsoft Graph alone, and there is no choice of a way) · **Target:** Microsoft Outlook (Microsoft 365)
 
 How MailCraft is built today. Rules for working in the code are in [`AGENTS.md`](../AGENTS.md). The
 shape — layers, "everything is a command", the swappable egui front end, the control channel, MCP,
@@ -8,14 +8,17 @@ shape — layers, "everything is a command", the swappable egui front end, the c
 
 ## Layers
 
-13 crates, 3 apps and `xtask` (`cargo xtask stats` prints lines and tests per crate). Layering is
+14 crates, 3 apps and `xtask` (`cargo xtask stats` prints lines and tests per crate). Layering is
 enforced by `cargo xtask layers`: a crate may only depend on crates in lower layers (one exception
 inside L3: `net` drives `proto`), and nothing below L6 depends on egui, eframe, winit or rfd.
+`craft-quit` (from [craft-libs](https://github.com/storytold/craft-libs), the Craft apps' shared
+code, taken from git pinned to one commit) is for the apps alone.
 
 | Layer | Crate | Job |
 |---|---|---|
 | L0 | `time` | Dates and times without a clock dependency: proleptic Gregorian maths, weekdays, ISO weeks, RFC 5322 and ISO 8601 text, list and group labels; time zones (`Zone`: the IANA database with its history, built in; Windows' names for zones; offsets; the system's zone), the only place the zone library is used; `now()` and the system's zone are the only calls that ask the system (or the browser) |
 | L0 | `control-key` | Per-window control-port key files shared by the app and the MCP bridge |
+| L0 | `charset` | Bytes to text in any character set of the WHATWG Encoding Standard (`encoding_rs`), one decoder for `mime` and `vcard`, which may not use each other |
 | L1 | `model` | The mailbox: accounts, folders, messages, contacts, calendars, events with recurrence, tasks, categories, rules, signatures; edit primitives (`move_message`, `delete_folder`…), conversations, the search query language, `repair()` for whatever a file held, and the sync data types |
 | L1 | `html` | Hostile HTML mail → display blocks (`parse`), plain text (`to_text`) and the line a message list shows (`preview`, `text_preview`); plain text → blocks and HTML; entities; the safe-URL rule |
 | L2 | `mime` | RFC 5322 / MIME reader and writer (`.eml`), encoded words, RFC 2231 parameters, charsets, mbox |
@@ -26,7 +29,7 @@ inside L3: `net` drives `proto`), and nothing below L6 depends on egui, eframe, 
 | L4 | `engine` | `Session` (mailbox, selection, view, the message being written, undo), the **command registry** (`cmd/*.rs`), the message list (`list.rs`), the Outlook feature catalog (`catalog.rs`), the sample mailbox, file dispatch (`io.rs`) |
 | L5 | `mcp` | MCP server: tools over the command registry; headless or bridged to the running app |
 | L6 | `ui-egui` | The front end: title bar with search, ribbon, module bar, folder pane, message list, reading pane, composer, calendar, people, tasks, Backstage, dialogs, themes, control channel, headless `ui_shot` example |
-| apps | `mailcraft` | Desktop app (eframe + wgpu; logging, window geometry, native dialogs, Send/Receive thread, control server) |
+| apps | `mailcraft` | Desktop app (eframe + wgpu; logging, window geometry, native dialogs, Send/Receive thread, control server; leaving, `quit.rs`: unsaved work asks first on every platform, then on macOS the process ends through `-[NSApplication terminate:]` (`craft-quit`) rather than by closing the window, which can crash AppKit, and the app menu's Quit (⌘Q) asks like the close button) |
 | apps | `mailcraft-cli` | `info`, `folders`, `list`, `show`, `import`, `export`, `convert`, `run`, `sync`, `commands`, `parity`, `mcp` |
 | apps | `mailcraft-web` | Browser build (eframe web runner, WebGPU with WebGL2 fallback; browser storage, file picker, downloads) |
 
@@ -66,12 +69,35 @@ inside L3: `net` drives `proto`), and nothing below L6 depends on egui, eframe, 
   clock, and only stamped. Everything that converts goes through `mailcraft_model::zoned`.
 - **Conversations are grouped by topic** (the subject without `RE:`/`FW:` prefixes) within an
   account, as the incumbent does, not by `References` chains.
-- **A mailbox file, and its content beside it.** On the desktop `mailbox.mailcraft` is JSON holding
-  everything but content; bodies and attachments over a kilobyte are write-once files named by
-  their SHA-256 in `mailbox.mailcraft.blobs/` (`crates/engine/src/store.rs`). A save after a read
-  mark writes a few megabytes on a background thread, atomically; a self-contained single file is
-  still what the browser, exports and `file.saveAs` use. Everything is in memory while the app
-  runs, which is the next limit (see `docs/gaps.md`).
+- **A mailbox file, and its content beside it.** On the desktop `mailbox.mailcraft` holds
+  everything but content as a log of records (format 3, `crates/engine/src/store_index.rs`): the
+  rest of the mailbox, and one record per message, contact, event or task; bodies and attachments
+  over a kilobyte are write-once files named by their SHA-256 in `mailbox.mailcraft.blobs/`
+  (`crates/engine/src/store.rs`). A save appends the records of what changed and a commit in one
+  flushed write, on a background thread: a read mark costs a few hundred bytes however large the
+  mailbox. What was last written is remembered item by item (its fingerprint, and a weak pointer
+  to the copy in memory that it is), so a save looks only at items whose copy changed; when the
+  appended records outgrow the mailbox, the file is written whole to a temporary file and renamed
+  over. Opening reads records to the last commit and parses items on several threads. A save a
+  crash cut short is records no commit closes, and isn't read. A later save with a damaged record
+  is where the reading stops (each save is a change to the one before, and a folder's mark of how
+  far its mail was fetched is written only when it moves, so a save read past a damaged one could
+  say mail is here that isn't); the saves from there on are counted. In the first save, which is
+  the whole mailbox, a damaged item costs only itself, and every folder's fetch mark is forgotten
+  so that missing mail comes again from its server. Either way `store::Opened::notice` says what
+  was left out (`file.open` returns it as `lostSaves`, `lostRecords`, `unfinished` and `notice`;
+  the window's status bar and the CLI show it), and the file is kept aside as
+  `<file>.damaged-<time>` before it is next written; a file another program wrote since it was
+  read here is kept as `<file>.changed-<time>` (one whose time changed but whose bytes are still what
+  was written here, by their SHA-256, is still this program's); MailCraft never removes a file kept
+  aside, as each may be the only copy of what it holds. The sweep keeps
+  every content file a kept-aside file names (damaged, changed, or of an earlier form). Formats 1
+  and 2 (JSON) are still read and become format 3 at the first changed save, the old file kept
+  beside it as `<file>.format1` or `.format2`, which is what MailCraft 0.4.3 and earlier can open
+  (they call a format-3 file not a mailbox); a file that begins as ours but in a form newer than
+  this program reads is said to be from a newer MailCraft. A self-contained single file is still what the browser, exports
+  and `file.saveAs` use. Everything is in memory while the app runs, which is the next limit
+  (R6.1, see `docs/gaps.md`).
 - **A Send/Receive arrives in pieces.** `mailcraft_net::sync_with` emits what was sent, what the
   server was told, then mail folder by folder (the Inbox first, newest first, fifty at a time),
   each piece safe to apply by itself (`apply_sync_part`), so mail shows while the rest is on its
@@ -81,12 +107,16 @@ inside L3: `net` drives `proto`), and nothing below L6 depends on egui, eframe, 
   host first asks Graph to send the Outbox and, every quarter of an hour, for the calendar and
   contacts (`crates/net/src/graph.rs`); the engine merges them as server-kept, read-only items
   (`cmd/remote.rs`, `Origin`). Mail itself still goes over IMAP.
-- **A Microsoft account kept in step through Graph alone (R3, behind a switch for testing).**
-  With `MAILCRAFT_GRAPH_MAIL=1` (`Session::graph_mail`) a Microsoft account is
-  `AccountKind::Microsoft`: no mail servers, never IMAP or SMTP ([ADR 0002](adr/0002-graph-mail-for-microsoft-accounts.md)).
+- **A Microsoft account kept in step through Graph alone (R3).**
+  A Microsoft account is `AccountKind::Microsoft`: no mail servers, never IMAP or SMTP.
+  One that was kept in step by IMAP switches when its owner says so (R3.7,
+  `cmd/graph_switch.rs`, the page in `ui-egui/src/graph_switch.rs`): what waits for the IMAP
+  server goes first, the mailbox is backed up beside its file, the server's mail is dropped and
+  comes down afresh, and its folders wait (`Folder::awaiting_listing`) to be found by path in
+  Graph's first complete listing, so that they keep their ids.
   Its folders and messages are known by server ids, beside what the server last said of them
   (`ServerFolder` on `Folder::server`, `ServerMessage` on `Message::server`;
-  [ADR 0003](adr/0003-server-ids-and-changes-from-the-last-synced-state.md)); a change made here is
+  the server id stays the same when the item moves); a change made here is
   the difference between the two, and only what comparing can't show waits in
   `Mailbox::queued` (a folder deleted for good). The request and answer are Graph's own, beside
   the IMAP ones (`GraphMailRequest`, `FolderChange`, `GraphMailResult`, `FolderListing` in
@@ -154,7 +184,12 @@ inside L3: `net` drives `proto`), and nothing below L6 depends on egui, eframe, 
   `ical`, `vcard`, `proto`) and round-tripping what the writers produce; in-process fake IMAP and
   SMTP servers on loopback for `net`; `engine/src/tests.rs::hostile_params_never_panic` runs every
   command with junk params; an MCP acceptance test drives a realistic triage through the protocol.
-- `cargo xtask ci`: fmt, clippy `-D warnings`, tests, asset attribution, layering, wasm build.
+- `cargo xtask ci`: fmt, clippy `-D warnings`, tests, asset attribution, layering, wasm build,
+  `cargo deny check` ([`deny.toml`](../deny.toml): RustSec advisories, licences, sources; skipped
+  with a hint when cargo-deny isn't installed, required in CI).
+- Workflows pin every third-party action to a commit SHA (Dependabot keeps them current); zizmor
+  checks them, OpenSSF Scorecard scores the repository. What all this defends against:
+  [`threat-model.md`](threat-model.md).
 - `cargo xtask parity` regenerates [`parity-checklist.md`](parity-checklist.md); a test keeps the
   catalog percentage above a floor that only rises.
 - GitHub Actions (shared `storytold/craft-common-actions` workflows): packaging lint, FreeBSD and
@@ -165,6 +200,7 @@ inside L3: `net` drives `proto`), and nothing below L6 depends on egui, eframe, 
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-11 | major | First architecture doc |
+| 2026-10-15 | minor | Supply-chain gates: cargo-deny in `cargo xtask ci` and CI, pinned actions, zizmor, Scorecard; link to the threat model |
 | 2026-10-12 | patch | `html` also makes the line a message list shows (`preview`, `text_preview`) |
 | 2026-10-12 | minor | Calendar changes are checked against what comes down; the strict Graph stand-in |
 | 2026-10-12 | minor | Time zones (M3.5): `time::Zone`, the mailbox's zone stamp and how stored times are read |
@@ -172,4 +208,10 @@ inside L3: `net` drives `proto`), and nothing below L6 depends on egui, eframe, 
 | 2026-10-13 | minor | The owner chooses how they are read (M4.3): `ews` in `net` (Exchange Web Services, until 1 April 2027), `Account::favorites_source`, the choice and its job in the front end |
 | 2026-10-15 | minor | Sign-ins remembered on Linux and FreeBSD (R5): the Secret Service behind `Services::secrets`, and `SecretStore::take_trouble` for a store that can't be used |
 | 2026-10-15 | minor | Exchange Web Services removed (R2): Graph is the one way of reading the Favorites; a mailbox that chose the other opens and says so once |
+| 2026-10-16 | minor | Quitting on macOS through `craft-quit` (craft-libs, a git dependency pinned by `rev`), for the apps alone (`cargo xtask layers`); Rust 1.95 |
 | 2026-10-15 | minor | R3.1: `AccountKind::Microsoft` behind the switch for testing; server ids (`ServerFolder`, `ServerMessage`, `Mailbox::queued`); Graph's own sync types; `graph::mail` and `graph::pace` in `net`; `cmd/graph_mail.rs` in the engine |
+| 2026-10-15 | minor | R6 (prerequisite of R6.1): the mailbox file in format 3, a log of records a save appends to (`store_index.rs`), crash-safe, formats 1 and 2 migrated with the old file kept; a damaged later save stops the reading there, a damaged item of the first save costs only itself and the mail is fetched again (`Opened::notice`, `file.open`'s `lostSaves`, `lostRecords`); a file another writer changed kept aside; kept-aside files protected from the sweep |
+| 2026-10-17 | minor | R6.1 review: files kept aside are never removed by MailCraft; a file whose time changed but whose bytes didn't is still this program's (`Stamp::sum`); a damaged commit of the first save loses no item |
+| 2026-10-16 | patch | The Graph-only account described without citing private decision records |
+| 2026-10-16 | minor | R3.7: the switch from IMAP to Graph (`cmd/graph_switch.rs`, `Account::graph_switch`, `Folder::awaiting_listing`); the switch for testing is gone |
+| 2026-10-18 | minor | `charset` (L0): the decoder of character sets moved out of `mime` so that `vcard` reads `CHARSET=` by the same rules, #180 |

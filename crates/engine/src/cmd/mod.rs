@@ -1,6 +1,8 @@
 //! Command implementations, one module per area. Each module exposes `specs()`.
 
 pub mod account;
+#[cfg(test)]
+mod answered_tests;
 pub mod calendar;
 pub mod calendar_extra;
 pub mod calendar_settings;
@@ -15,16 +17,24 @@ pub mod folder;
 pub mod format;
 #[cfg(test)]
 mod format_tests;
+pub mod graph_down;
+pub mod graph_drafts;
 pub mod graph_mail;
+pub mod graph_send;
+pub mod graph_switch;
+pub mod graph_up;
 pub mod mail;
 pub mod people;
 #[cfg(test)]
 mod quote_tests;
 pub mod remote;
 pub mod rules;
+pub mod search_server;
+pub mod shared;
 pub mod signature;
 #[cfg(test)]
 mod signature_tests;
+pub mod sync_progress;
 pub mod tasks;
 pub mod view;
 #[cfg(test)]
@@ -59,7 +69,12 @@ pub fn registry() -> Registry {
     v.extend(dav::specs());
     v.extend(signature::specs());
     v.extend(graph_mail::specs());
+    v.extend(shared::specs());
+    v.extend(graph_switch::specs());
+    v.extend(graph_send::specs());
     v.extend(remote::specs());
+    v.extend(sync_progress::specs());
+    v.extend(search_server::specs());
     Registry::new(v)
 }
 

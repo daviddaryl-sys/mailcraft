@@ -20,7 +20,8 @@ commands:
   assets          check that every icon/image/font/asset is attributed in ATTRIBUTION.md
   layers          enforce the crate dependency layering (docs/architecture.md)
   wasm            cargo check --target wasm32-unknown-unknown for the wasm-safe crates
-  ci              fmt --check, clippy -D warnings, test, assets, layers, wasm (stops at first failure)
+  deny            cargo deny check (advisories, licences, bans, sources; see deny.toml)
+  ci              fmt --check, clippy -D warnings, test, assets, layers, wasm, deny (stops at first failure)
   stats [--exact] count tests and lines per crate (--exact: ask the test harness via `-- --list`)
   parity          recompute the Outlook feature-parity summary in docs/parity-checklist.md
   ico <out.ico> <in.png>...
@@ -36,6 +37,7 @@ fn main() -> ExitCode {
         Some("assets") => assets::run(&root()),
         Some("layers") => cmd_layers(),
         Some("wasm") => cmd_wasm(),
+        Some("deny") => cmd_deny(),
         Some("ci") => cmd_ci(),
         Some("stats") => stats::run(&root(), rest.contains(&"--exact")),
         Some("parity") => parity::run(&root()),
@@ -148,6 +150,23 @@ fn cmd_wasm() -> Result<(), String> {
     if failed == 0 { Ok(()) } else { Err(format!("{failed} crate(s) failed the wasm check")) }
 }
 
+/// `cargo deny check` against deny.toml. cargo-deny is a separate install: without it the step
+/// says how to get it and passes on a developer's machine, and fails where `CI` is set.
+fn cmd_deny() -> Result<(), String> {
+    let installed = cargo().args(["deny", "--version"]).output().map(|o| o.status.success()).unwrap_or(false);
+    if !installed {
+        let hint = "cargo-deny is not installed: `cargo install cargo-deny --locked`";
+        if std::env::var_os("CI").is_some() {
+            return Err(hint.into());
+        }
+        eprintln!("deny: skipped, {hint}");
+        return Ok(());
+    }
+    let mut c = cargo();
+    c.args(["deny", "check"]);
+    run(c, "cargo deny check")
+}
+
 fn cmd_ci() -> Result<(), String> {
     type Step = (&'static str, Box<dyn Fn() -> Result<(), String>>);
     let steps: Vec<Step> = vec![
@@ -178,6 +197,7 @@ fn cmd_ci() -> Result<(), String> {
         ("assets", Box::new(|| assets::run(&root()))),
         ("layers", Box::new(cmd_layers)),
         ("wasm", Box::new(cmd_wasm)),
+        ("deny", Box::new(cmd_deny)),
     ];
     // `XTASK_CI_SKIP=clippy,wasm`: steps another runner covers (CI runs them on Linux only).
     let skip = std::env::var("XTASK_CI_SKIP").unwrap_or_default();

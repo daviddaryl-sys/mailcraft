@@ -12,7 +12,9 @@ pub fn specs() -> Vec<CommandSpec> {
             .pure()
             .key("Mod+Y")
             .params(r#"{"id": number} | {"kind": "inbox"|"drafts"|"sent"|"deleted"|"junk"|"archive"|"outbox", "account"?: number} | {"path": "Inbox/Projects"}"#),
-        CommandSpec::new("folder.list", "List Folders", "Folder", list).pure(),
+        CommandSpec::new("folder.list", "List Folders", "Folder", list).pure().params(
+            r#"{} — every account's folder tree with each folder's messages and unread, and for each account its own "unread" (a shared mailbox's are on its own entry, with "sharedOf": the account it is opened through, and never added to that account's), "favoritesFrom", and "favorites": what the pane lists under Favorites, in its order"#,
+        ),
         CommandSpec::new("folder.new", "New Folder", "Folder › New", new)
             .key("Mod+Shift+E")
             .params(r#"{"name": string, "parent"?: number | null (default: the folder in view; null: top level), "account"?: number}"#),
@@ -20,7 +22,7 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("folder.move", "Move Folder", "Folder › Actions", move_folder).params(r#"{"parent": number | null, "id"?: number}"#),
         CommandSpec::new("folder.delete", "Delete Folder", "Folder › Actions", delete).params(FOLDER),
         CommandSpec::new("folder.favorite", "Add to Favorites", "Folder › Favorites", favorite).params(
-            r#"{"value"?: bool (default: toggle), "id"?: number} — refused for a folder of an account whose Favorites come from its server (Outlook's list, which is changed in Outlook; `view.favorites` says which accounts those are)"#,
+            r#"{"value"?: bool (default: toggle), "id"?: number} — refused for a folder of an account whose Favorites come from its server (Outlook's list, which is changed in Outlook; `view.favorites` says which accounts those are). A shared mailbox's folders are favourites kept in MailCraft, whatever the account it is opened through has: nothing is written to any server for them"#,
         ),
         CommandSpec::new("view.favorites", "Favorites from Outlook", "File › Options", favorites_command).pure().params(
             r#"{"own"?: bool} — "own": true shows the Favorites that are marked here even for an account whose server has a list of its own, false the server's list where there is one (default: as it is). Answers what the folder pane lists under Favorites, in its order: {"own": bool, "favorites": [{"id", "name", "account", "path"}], "accounts": [{"account": number, "from": "server" | "mailbox", "listed": number}]}"#,
@@ -155,16 +157,29 @@ fn tree(s: &Session, account: Id, parent: Option<Id>, depth: usize) -> Vec<Value
 }
 
 fn list(s: &mut Session, _: &Value) -> CmdResult {
+    // Each account's unread, in one pass over the mail: its own messages alone.
+    let mut unread: std::collections::HashMap<Id, usize> = std::collections::HashMap::new();
+    for m in s.mailbox.messages.values().filter(|m| !m.read) {
+        let n = unread.entry(m.account).or_default();
+        *n = n.saturating_add(1);
+    }
     let accounts: Vec<Value> = s
         .mailbox
         .accounts
         .iter()
         .map(|a| {
-            json!({
-                "id": a.id, "name": a.name, "email": a.email, "kind": a.kind,
+            let unread = unread.get(&a.id).copied().unwrap_or(0);
+            let mut entry = json!({
+                "id": a.id, "name": a.name, "email": a.email, "kind": a.kind, "unread": unread,
                 "favoritesFrom": if favorites_from_server(s, a.id) { "server" } else { "mailbox" },
                 "folders": tree(s, a.id, None, 0),
-            })
+            });
+            // A shared mailbox (#70): its unread are its own, and the account it is opened
+            // through is named.
+            if let (Some(owner), Some(o)) = (a.shared_of, entry.as_object_mut()) {
+                o.insert("sharedOf".into(), json!(owner));
+            }
+            entry
         })
         .collect();
     Ok(json!({"accounts": accounts, "current": s.view.folder, "favorites": favorites(s)}))

@@ -1,5 +1,5 @@
-//! Text values: cleaning, escaping, splitting, and the 2.1 encodings (quoted-printable, base64,
-//! charsets).
+//! Text values: cleaning, escaping, splitting, and the 2.1 encodings (quoted-printable, base64;
+//! a `CHARSET` is read by `mailcraft-charset`, as mail is).
 
 use base64::Engine as _;
 
@@ -133,27 +133,6 @@ pub(crate) fn base64_bytes(s: &str) -> Vec<u8> {
     base64::engine::general_purpose::STANDARD_NO_PAD.decode(compact.trim_end_matches('=')).unwrap_or_default()
 }
 
-/// Bytes as text in the named charset: UTF-8, or one of the Western single-byte sets. Without a
-/// name it is UTF-8 when the bytes are valid UTF-8, and Windows-1252 otherwise.
-pub(crate) fn decode(bytes: Vec<u8>, charset: &str) -> String {
-    let western = |bytes: &[u8]| bytes.iter().map(|b| windows_1252(*b)).collect::<String>();
-    match charset.trim().to_ascii_uppercase().as_str() {
-        "ISO-8859-1" | "ISO8859-1" | "ISO_8859-1" | "LATIN1" | "LATIN-1" | "L1" | "WINDOWS-1252" | "CP1252" | "CP-1252" => western(&bytes),
-        "UTF-8" | "UTF8" => String::from_utf8_lossy(&bytes).into_owned(),
-        _ => String::from_utf8(bytes).unwrap_or_else(|e| western(e.as_bytes())),
-    }
-}
-
-/// One Windows-1252 byte (a superset of what ISO 8859-1 prints) as a character.
-fn windows_1252(b: u8) -> char {
-    const HIGH: [char; 32] = [
-        '\u{20ac}', '\u{81}', '\u{201a}', '\u{192}', '\u{201e}', '\u{2026}', '\u{2020}', '\u{2021}', '\u{2c6}', '\u{2030}', '\u{160}', '\u{2039}',
-        '\u{152}', '\u{8d}', '\u{17d}', '\u{8f}', '\u{90}', '\u{2018}', '\u{2019}', '\u{201c}', '\u{201d}', '\u{2022}', '\u{2013}', '\u{2014}',
-        '\u{2dc}', '\u{2122}', '\u{161}', '\u{203a}', '\u{153}', '\u{9d}', '\u{17e}', '\u{178}',
-    ];
-    HIGH.get(usize::from(b).wrapping_sub(0x80)).copied().unwrap_or(char::from(b))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,18 +192,6 @@ mod tests {
         assert!(base64_bytes("").is_empty());
     }
 
-    #[test]
-    fn decodes_charsets() {
-        assert_eq!(decode("Jürgen".as_bytes().to_vec(), "utf-8"), "Jürgen");
-        assert_eq!(decode("Jürgen".as_bytes().to_vec(), ""), "Jürgen");
-        assert_eq!(decode(vec![b'J', 0xfc, b'r', b'g', b'e', b'n'], "ISO-8859-1"), "Jürgen");
-        assert_eq!(decode(vec![0x80, b'5', 0x97, 0x93, b'x', 0x94], "windows-1252"), "€5—“x”");
-        // No charset named and not UTF-8: Western.
-        assert_eq!(decode(vec![b'J', 0xfc, b'r', b'g', b'e', b'n'], ""), "Jürgen");
-        assert_eq!(decode(vec![b'J', 0xfc], "UTF-8"), "J\u{fffd}");
-        assert_eq!(decode(vec![b'J', 0xfc], "x-unknown"), "Jü");
-    }
-
     proptest::proptest! {
         #[test]
         fn clean_text_survives_escaping(s in "(\\PC|[\n\t;,\\\\:]){0,80}") {
@@ -235,9 +202,8 @@ mod tests {
         }
 
         #[test]
-        fn text_helpers_never_panic(s in proptest::prelude::any::<String>(), bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..64), max in 0usize..5) {
+        fn text_helpers_never_panic(s in proptest::prelude::any::<String>(), max in 0usize..5) {
             let _ = (single(&s), multi(&s), unescape(&s), split(&s, ';', max), component(&s, ", ", false), quoted_printable(&s), base64_bytes(&s));
-            let _ = (decode(bytes.clone(), ""), decode(bytes.clone(), "latin1"), decode(bytes, &s));
             proptest::prop_assert!(!escape(&multi(&s)).contains(['\r', '\n']));
             proptest::prop_assert!(!single(&s).contains(['\r', '\n']));
         }

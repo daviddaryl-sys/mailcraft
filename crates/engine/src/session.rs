@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use mailcraft_model::{Attachment, Id, Importance, Mailbox, Message, RichBody};
+use mailcraft_model::{Attachment, ContentRef, Id, Importance, Mailbox, Message, RichBody};
 use mailcraft_time::{Date, DateTime, Timestamp, Weekday, Zone};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,32 @@ use crate::{CmdError, Registry};
 
 /// Undo steps kept.
 const MAX_HISTORY: usize = 100;
+
+/// How long a search spends bringing the bodies of older mail into memory before it answers with
+/// what it has searched (and says what it hasn't).
+const SEARCH_TIME: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Most bytes of bodies and attachments a session keeps in its messages after bringing them in
+/// ([`Session::load_where`]), beyond what the mailbox brought in when it opened: past it, what
+/// was used longest ago and is safely on disk goes back to being named only (128 MB).
+pub const LOADED_MAX: u64 = 128 << 20;
+
+/// The largest calendar part (an invitation's `.ics`) read from a message: one past it is left
+/// where it is, unread.
+pub(crate) const MAX_CALENDAR_PART: usize = 2 << 20;
+
+/// Messages one load looks at to let go of their content ([`Session::evict`]).
+#[cfg(not(target_arch = "wasm32"))]
+const EVICT_TRIES: usize = 16;
+
+/// One part of a message whose bytes [`Session::content`] fetches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Part {
+    Text,
+    Html,
+    /// An attachment, by its index in `Message::attachments`.
+    Attachment(usize),
+}
 
 /// The part of the app in front: mail, calendar, people or tasks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -350,7 +376,7 @@ pub struct InsertedSignature {
     pub text: mailcraft_model::RichText,
 }
 
-/// A signature open in File › Options › Signatures (R4.5.3): edited as a message's body is, by the
+/// A signature open in File › Signatures (R4.5.3): edited as a message's body is, by the
 /// same commands, until `signature.save` puts it back in the mailbox.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SignatureEdit {
@@ -467,6 +493,20 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// How far the word index a search answers from has got (R6.2; [`Session::word_index`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WordIndex {
+    /// None is kept: the browser, a mailbox kept in no file, or a host that didn't ask for one
+    /// ([`Session::index_words`]). A search reads the messages themselves.
+    Off,
+    /// Its file is being read, or messages are being read into it in the background (`done` of
+    /// `total`; both 0 while there is nothing to count yet): what it hasn't got yet is searched
+    /// as without an index, more slowly.
+    Building { done: usize, total: usize },
+    /// It holds every message as it is.
+    Complete,
+}
+
 /// The clock commands read; tests and scripts pin it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Clock {
@@ -483,6 +523,9 @@ pub struct Clock {
 struct Undo {
     label: &'static str,
     mailbox: Mailbox,
+    /// What the step did to the Microsoft accounts' mail, for keeping them in step when it is
+    /// undone ([`crate::undo`]).
+    touched: crate::undo::Touched,
     sel: Selection,
     folder: Id,
 }
@@ -493,7 +536,7 @@ pub struct Session {
     pub sel: Selection,
     /// The message being written, if one is open.
     pub compose: Option<Compose>,
-    /// A signature open in File › Options › Signatures. While there is one, the editing commands
+    /// A signature open in File › Signatures. While there is one, the editing commands
     /// work on it instead of the message being written ([`Session::doc`]).
     pub signature_edit: Option<SignatureEdit>,
     pub prefs: Prefs,
@@ -505,15 +548,117 @@ pub struct Session {
     pub clock: Clock,
     /// What the last synchronisation reported, for the status bar.
     pub sync_status: String,
-    /// Microsoft accounts may be kept in step through Microsoft Graph (R3): the switch for
-    /// testing, which a host turns on when `MAILCRAFT_GRAPH_MAIL=1` (R3 spec S35). Off, nothing
-    /// makes such an account (`account.add` with `"kind": "microsoft"` is refused); the ones a
-    /// mailbox has stay what they are. Never saved.
-    pub graph_mail: bool,
+    /// Send/Receive Progress: the run under way, or the last one, account by account. Kept up
+    /// to date by `sync.apply` and `sync.applyGraph`; in memory only, never saved.
+    pub sync_progress: crate::cmd::sync_progress::SyncProgress,
+    /// Messages kept in step through Graph, by server id: kept between the pages of a run.
+    pub(crate) graph_index: crate::cmd::graph_down::ServerIndex,
+    /// Messages of Microsoft accounts the server wouldn't give whole this session, by account and
+    /// server id: the background passes them over (opening one still asks). Never saved.
+    pub(crate) graph_unfetchable: std::collections::HashSet<(Id, String)>,
+    /// Messages being moved out of a Microsoft account that were whole in the mailbox file when
+    /// it was last saved: only for those is the server's copy removed (R3 spec S19). Never saved.
+    pub(crate) saved_whole: std::collections::HashSet<Id>,
+    /// What the server refused in the Graph run under way, for the status at its end (S20).
+    pub(crate) graph_said: Vec<String>,
+    /// Set while a command an agent asked for runs (with what the owner allowed it): what the
+    /// command did is checked against that ([`crate::agent`]), and undone when it oversteps.
+    pub agent: Option<Vec<crate::agent::Class>>,
+    /// A copy of the mailbox the window had the host write off its own thread before switching an
+    /// account to Microsoft Graph (the account, where the copy is): `account.graphSwitch` takes it
+    /// instead of writing one itself ([`crate::cmd::graph_switch::prepare_backup`]). Set only by
+    /// the window once the copy is on disk, never by a command's params. Never saved.
+    pub graph_switch_backup: Option<(Id, PathBuf)>,
+    /// More results on the server for the search in view (R6.2): what was asked of the servers
+    /// and what they found, never in the mailbox. Never saved.
+    pub server_search: crate::cmd::search_server::ServerSearch,
+    /// Shared mailboxes may be added and read (#70): the switch for testing, off until changes
+    /// in them go up, so that no owner is asked for a shared mailbox's permission by a build that
+    /// only reads one. Set by the host (`MAILCRAFT_SHARED_MAILBOXES=1`), never by a command's
+    /// params. Never saved.
+    pub shared_mailboxes: bool,
     history: Vec<Undo>,
     redo: Vec<Undo>,
+    /// What the last undo or redo couldn't do there (a delete for good, a message sent).
+    undo_said: Vec<String>,
     rev: u64,
     list_cache: Option<(String, Arc<Vec<Row>>)>,
+    /// Where the content that isn't in memory comes from ([`Session::content`]). `None`: the
+    /// content folder beside the mailbox file, where there is one (the desktop); the browser,
+    /// which keeps everything in memory, never asks.
+    pub content_source: Option<Arc<dyn crate::io::ContentSource>>,
+    /// Counts the parts brought into memory (caches that read bodies key on it with `rev`).
+    loads: u64,
+    /// Messages the last search left out because their bodies weren't in memory and loading them
+    /// ran past [`Session::search_time`]; the list says so.
+    pub unsearched: usize,
+    /// How long one search spends bringing bodies into memory before it goes with what it has.
+    pub search_time: std::time::Duration,
+    /// How many bytes brought into messages are kept there ([`LOADED_MAX`]).
+    pub loaded_budget: u64,
+    /// Messages content was brought into, the longest unused first, with the bytes each took.
+    resident: std::collections::VecDeque<(Id, u64)>,
+    resident_bytes: u64,
+    /// Messages whose showing couldn't bring in what it needs (a picture's or a calendar part's
+    /// file missing or damaged): not asked for again every frame, until the mailbox is opened anew.
+    display_failed: std::collections::HashSet<Id>,
+    /// While a command runs: the messages content was brought into or let go of, each as it was
+    /// and as it became ([`Session::put_message`]), so that the state the command started from
+    /// (its Undo step, and what a failed command goes back to) has them as they are now. Bringing
+    /// content in is not a change to the mailbox.
+    swaps: Option<Swaps>,
+    /// Since a search that reads bodies brought them in: the query, and whether each message
+    /// whose body was let go of since matched it ([`Session::load_bodies_for_search`]). Kept
+    /// while the list stays as it was searched (`searched_for`), so that a result opened, whose
+    /// body comes in, doesn't search everything again.
+    search_pass: Option<(mailcraft_model::search::Query, std::collections::HashMap<Id, bool>)>,
+    /// What the list was when `search_pass` was made: its key without the loads.
+    searched_for: Option<String>,
+    /// Keep a word index beside the mailbox file, which a search answers from (R6.2): set by a
+    /// host that wants it (the desktop app), never by a command's params. Off, a search reads
+    /// the messages themselves, as it always does in the browser. Never saved.
+    pub index_words: bool,
+    /// The word index of the mailbox file, while [`Session::index_words`] is on and the mailbox
+    /// is kept in a file ([`crate::words`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    words: Option<crate::words::Words>,
+}
+
+/// Message `id` was `old` and is `new`, the same message with more or less of it in memory.
+struct Swap {
+    id: Id,
+    old: Arc<Message>,
+    new: Arc<Message>,
+}
+
+/// The swaps of a command, one a message where they follow on from each other: a message brought
+/// in and let go of again many times (a search that reads every body) keeps only what it was
+/// first and what it is last, not every body it held between (#173).
+#[derive(Default)]
+struct Swaps {
+    list: Vec<Swap>,
+    /// Where in `list` each message's latest swap is.
+    last: std::collections::HashMap<Id, usize>,
+}
+
+impl Swaps {
+    fn push(&mut self, swap: Swap) {
+        if let Some(&i) = self.last.get(&swap.id)
+            && let Some(prev) = self.list.get_mut(i)
+            && Arc::ptr_eq(&prev.new, &swap.old)
+        {
+            // `old` became `prev.new` and that became `new`: the same as `old` becoming `new`.
+            prev.new = swap.new;
+            return;
+        }
+        self.last.insert(swap.id, self.list.len());
+        self.list.push(swap);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.list.len()
+    }
 }
 
 impl Session {
@@ -536,11 +681,34 @@ impl Session {
             dirty: false,
             clock,
             sync_status: String::new(),
-            graph_mail: false,
+            sync_progress: Default::default(),
+            graph_index: Default::default(),
+            graph_unfetchable: Default::default(),
+            saved_whole: Default::default(),
+            graph_said: Vec::new(),
+            agent: None,
+            graph_switch_backup: None,
+            server_search: Default::default(),
+            shared_mailboxes: false,
             history: Vec::new(),
             redo: Vec::new(),
+            undo_said: Vec::new(),
             rev: 0,
             list_cache: None,
+            content_source: None,
+            loads: 0,
+            unsearched: 0,
+            search_time: SEARCH_TIME,
+            loaded_budget: LOADED_MAX,
+            resident: std::collections::VecDeque::new(),
+            resident_bytes: 0,
+            display_failed: std::collections::HashSet::new(),
+            swaps: None,
+            search_pass: None,
+            searched_for: None,
+            index_words: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            words: None,
         };
         s.view.date = s.today();
         s.normalize();
@@ -677,17 +845,530 @@ impl Session {
         self.sel.focus().and_then(|id| self.mailbox.message(id))
     }
 
-    /// The rows of the message list for the folder, filter, search and sort in view.
+    /// Counts the times content was brought into memory or let go of ([`Session::load_where`]):
+    /// not a change to the mailbox, but what is shown of it (a preview, a search) may differ.
+    pub fn loads(&self) -> u64 {
+        self.loads
+    }
+
+    /// The rows of the message list for the folder, filter, search and sort in view. A search
+    /// that reads bodies brings the bodies it lacks into memory first, newest first, for as long
+    /// as [`Session::search_time`] allows; what it didn't get to is counted in
+    /// [`Session::unsearched`].
     pub fn rows(&mut self) -> Arc<Vec<Row>> {
-        let key = format!("{}|{}|{}", self.rev, self.today().to_days(), serde_json::to_string(&self.view).unwrap_or_default());
+        let list =
+            |s: &Session| format!("{}|{}|{}|{}", s.rev, s.today().to_days(), s.words_finished(), serde_json::to_string(&s.view).unwrap_or_default());
+        let key = |s: &Session| format!("{}|{}", s.loads, list(s));
         if let Some((k, rows)) = &self.list_cache
-            && *k == key
+            && *k == key(self)
         {
             return rows.clone();
         }
-        let rows = Arc::new(crate::list::rows(self));
+        let list_now = list(self);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.words_in_step(!mailcraft_model::search::Query::parse(&self.view.search).is_empty());
+        #[cfg(not(target_arch = "wasm32"))]
+        let (decided, unverified) = self.search_words();
+        #[cfg(target_arch = "wasm32")]
+        let (decided, unverified) = (std::collections::HashMap::new(), 0);
+        let searched = match &self.search_pass {
+            // Only content came in or went since this list was searched (a result opened): what
+            // was found stands, and nothing is brought in for it again.
+            Some((_, hits)) if self.searched_for.as_deref() == Some(list_now.as_str()) => hits.clone(),
+            _ => {
+                let hits = self.load_bodies_for_search(&decided);
+                self.unsearched = self.unsearched.saturating_add(unverified);
+                self.searched_for = self.search_pass.is_some().then_some(list_now);
+                hits
+            }
+        };
+        let key = key(self);
+        let rows = Arc::new(crate::list::rows_with(self, &decided, &searched));
         self.list_cache = Some((key, rows.clone()));
         rows
+    }
+
+    /// Keep the word index of the mailbox file ([`crate::words`]) while [`Session::index_words`]
+    /// is on and the mailbox is kept in a file: the one beside the file it is kept in now (read,
+    /// and built where it lacks messages, in the background), brought in step with the mailbox
+    /// before a search is answered (`search`), when an account went, and when the background is
+    /// done.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn words_in_step(&mut self, search: bool) {
+        let Some(path) = self.path.clone().filter(|_| self.index_words) else {
+            self.words = None;
+            return;
+        };
+        let mut words = match self.words.take() {
+            Some(words) if words.mailbox() == path => words,
+            _ => crate::words::Words::open(&path, self.mailbox.messages.values().cloned().collect()),
+        };
+        // Also once the background is done: what came while it read is looked at then.
+        if search || words.account_gone(&self.mailbox) || (!words.building() && !words.complete()) {
+            words.in_step(&self.mailbox, &|m| self.kept_text(m));
+        }
+        self.words = Some(words);
+    }
+
+    /// The search in view, answered from the word index for the messages in view it holds as
+    /// they are (R6.2): whether each matches. A word finds the messages holding a word that starts
+    /// with it, in the parts its keyword names; what the index doesn't hold (`is:`, dates,
+    /// categories) is looked at on the message, which is in memory. A phrase is checked on the
+    /// message itself, its text read from disk when it is kept there, within
+    /// [`Session::search_time`]: what that leaves unread doesn't match and is counted (the
+    /// second number). Messages the index hasn't got (being read in the background) are left out,
+    /// to be searched as without an index.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn search_words(&self) -> (std::collections::HashMap<Id, bool>, usize) {
+        use std::cell::Cell;
+        let mut decided = std::collections::HashMap::new();
+        let query = mailcraft_model::search::Query::parse(&self.view.search);
+        let Some(words) = self.words.as_ref().filter(|_| !query.is_empty()) else { return (decided, 0) };
+        let mut verify: Vec<Id> = Vec::new();
+        {
+            let guard = words.lock();
+            let Some(index) = guard.as_ref() else { return (decided, 0) };
+            let sets: Vec<Option<crate::words::Bits>> =
+                (0..query.len()).map(|i| query.words_of(i).map(|(fields, w)| index.matching(w, fields))).collect();
+            let in_view = crate::list::in_view(self);
+            for m in self.mailbox.messages.values() {
+                let Some(slot) = index.slot_of(m.id) else { continue };
+                if !in_view(m) {
+                    continue;
+                }
+                let text_on_disk = crate::words::body_in_memory(m).is_none();
+                let unread_phrase = Cell::new(false);
+                let hit = query.matches_with(m, self.offset_at(m.date), |i| {
+                    let set = sets.get(i)?.as_ref()?;
+                    if !set.has(slot) {
+                        return Some(false);
+                    }
+                    let (fields, w) = query.words_of(i)?;
+                    if w.len() <= 1 {
+                        return Some(true);
+                    }
+                    // A phrase: its words one after another, looked at on the message.
+                    if fields & mailcraft_model::words::BODY != 0 && text_on_disk {
+                        unread_phrase.set(true);
+                        return Some(true);
+                    }
+                    None
+                });
+                // Said to be there before it was looked at: the whole query is looked at on
+                // the text as it is (a phrase that is there may make a `-` term fail).
+                if unread_phrase.get() {
+                    verify.push(m.id);
+                } else {
+                    decided.insert(m.id, hit);
+                }
+            }
+        }
+        let deadline = std::time::Instant::now().checked_add(self.search_time);
+        let mut unread = 0;
+        for id in verify {
+            let in_time = deadline.is_none_or(|d| std::time::Instant::now() < d);
+            let hit = in_time && self.loaded_message_where(id, |_| false).is_ok_and(|m| query.matches(&m, self.offset_at(m.date)));
+            unread += usize::from(!in_time);
+            decided.insert(id, hit);
+        }
+        (decided, unread)
+    }
+
+    /// How far the word index a search answers from has got.
+    pub fn word_index(&self) -> WordIndex {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(words) = &self.words {
+            return match words.progress() {
+                Some((done, total)) => WordIndex::Building { done, total },
+                None if words.complete() => WordIndex::Complete,
+                // Done reading, with what came while it read still to be looked at (when the
+                // list is next worked out): nothing to count.
+                None => WordIndex::Building { done: 0, total: 0 },
+            };
+        }
+        WordIndex::Off
+    }
+
+    /// Wait until the word index holds the mailbox as it is now (started if it wasn't), for as
+    /// long as that takes: for the bench and tests, never the window.
+    pub fn wait_for_word_index(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        for _ in 0..8 {
+            self.words_in_step(false);
+            let Some(words) = &mut self.words else { return };
+            words.wait();
+            self.words_in_step(true);
+            if self.words.as_ref().is_none_or(|w| !w.building()) {
+                return;
+            }
+        }
+    }
+
+    /// Counts the times the word index's background finished: a list searched before it did is
+    /// worked out again.
+    fn words_finished(&self) -> u64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(words) = &self.words {
+            return words.finished();
+        }
+        0
+    }
+
+    /// The word index this session keeps, if any.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn words(&self) -> Option<&crate::words::Words> {
+        self.words.as_ref()
+    }
+
+    /// The text of message `m` that is kept outside memory, read from where it is kept (also when
+    /// reading it failed before, and the message says so in its place).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn kept_text(&self, m: &Message) -> Option<String> {
+        let r = m.kept.as_deref()?.text?;
+        self.fetch(&r).ok().map(|bytes| text_of(&bytes))
+    }
+
+    // ---- content that isn't in memory ----
+
+    /// Where content comes from: what the host set, else the content folder beside the mailbox
+    /// file (`crate::store`), where this build has one.
+    fn source(&self) -> Option<Arc<dyn crate::io::ContentSource>> {
+        if let Some(source) = &self.content_source {
+            return Some(source.clone());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let beside: Option<Arc<dyn crate::io::ContentSource>> = Some(Arc::new(crate::store::Content));
+        #[cfg(target_arch = "wasm32")]
+        let beside = None;
+        beside
+    }
+
+    /// Fetch what `r` names from the source.
+    fn fetch(&self, r: &ContentRef) -> Result<Arc<Vec<u8>>, CmdError> {
+        let kept_nowhere = || CmdError::Failed("the mailbox isn't kept in a file, so content outside memory can't be read".into());
+        let path = self.path.as_deref().ok_or_else(kept_nowhere)?;
+        let source = self.source().ok_or_else(kept_nowhere)?;
+        source.fetch(path, r).map_err(CmdError::Failed)
+    }
+
+    /// The bytes of one part of a message: from memory when they are there, else from where the
+    /// mailbox keeps them (the content folder beside its file on the desktop). The one way to
+    /// the bytes of an attachment, wherever they are. An error names what is wrong: no such
+    /// message or part, or a part whose file is missing or damaged.
+    pub fn content(&self, message: Id, part: Part) -> Result<Arc<Vec<u8>>, CmdError> {
+        let m = self.mailbox.message(message).ok_or_else(|| CmdError::Failed(format!("no message with id {message}")))?;
+        let kept = m.kept.as_deref().filter(|k| !k.failed);
+        match part {
+            Part::Text => match kept.and_then(|k| k.text).filter(|_| m.body.text.is_empty()) {
+                Some(r) => self.fetch(&r),
+                None => Ok(Arc::new(m.body.text.as_bytes().to_vec())),
+            },
+            Part::Html => match kept.and_then(|k| k.html).filter(|_| m.body.html.is_none()) {
+                Some(r) => self.fetch(&r),
+                None => Ok(Arc::new(m.body.html.as_deref().unwrap_or("").as_bytes().to_vec())),
+            },
+            Part::Attachment(i) => {
+                let a = m.attachments.get(i).ok_or_else(|| CmdError::Failed(format!("the message has no attachment {i}")))?;
+                match a.kept.filter(|_| a.data.is_empty()) {
+                    Some(r) => self.fetch(&r),
+                    None => Ok(a.data.clone()),
+                }
+            }
+        }
+    }
+
+    /// A copy of message `id` with its body and the attachments `pick` chooses in memory (the
+    /// message itself when nothing had to be fetched), without changing the mailbox: for what
+    /// writes a message out (MIME to send or export, a forward).
+    pub fn loaded_message_where(&self, id: Id, pick: impl Fn(&Attachment) -> bool) -> Result<Arc<Message>, CmdError> {
+        let m = self.mailbox.messages.get(&id).ok_or_else(|| CmdError::Failed(format!("no message with id {id}")))?;
+        if !m.body_is_kept() && m.attachments.iter().all(|a| a.is_loaded() || !pick(a)) {
+            return Ok(m.clone());
+        }
+        let mut copy = Message::clone(m);
+        loaded_into(&mut copy, |part| self.content(id, part), &pick)?;
+        Ok(Arc::new(copy))
+    }
+
+    /// A copy of message `id` with what a reply quotes in memory: its body, and the pictures its
+    /// HTML shows in place (`cid:`). Its other attachments stay where they are.
+    pub fn loaded_for_reply(&self, id: Id) -> Result<Arc<Message>, CmdError> {
+        let m = self.loaded_message_where(id, |_| false)?;
+        let html = m.body.html.as_deref().unwrap_or("");
+        if m.attachments.iter().all(|a| a.is_loaded() || !shown_in(html, a)) {
+            return Ok(m);
+        }
+        let mut copy = Message::clone(&m);
+        loaded_into(&mut copy, |part| self.content(id, part), &|a| shown_in(html, a))?;
+        Ok(Arc::new(copy))
+    }
+
+    /// [`Session::loaded_message_where`] with every attachment.
+    pub fn loaded_message(&self, id: Id) -> Result<Arc<Message>, CmdError> {
+        self.loaded_message_where(id, |_| true)
+    }
+
+    /// Bring the body of message `id` and the attachments `pick` chooses into memory, in the
+    /// mailbox itself, so that everything that reads the message finds them. Not a change to the
+    /// mailbox (nothing to undo or save), though caches that read bodies see it. Returns whether
+    /// anything was brought in. A body whose file couldn't be read says so in its text from then
+    /// on (until the mailbox is opened again), and the error says why. What the message names
+    /// for its body stays as it was: a read that failed (a file locked for a moment, memory that
+    /// wasn't there) is never written back as the body, and the file stays named, to be read
+    /// the next time.
+    pub fn load_where(&mut self, id: Id, pick: impl Fn(&Attachment) -> bool) -> Result<bool, CmdError> {
+        let Some(m) = self.mailbox.messages.get(&id) else { return Err(CmdError::Failed(format!("no message with id {id}"))) };
+        if !m.body_is_kept() && m.attachments.iter().all(|a| a.is_loaded() || !pick(a)) {
+            return Ok(false);
+        }
+        let mut copy = Message::clone(m);
+        let loaded = loaded_into(&mut copy, |part| self.content(id, part), &pick);
+        if let Err(e) = &loaded
+            && copy.body_is_kept()
+            && let Some(kept) = copy.kept.as_deref_mut()
+        {
+            // Said once, in the message, instead of being asked for again every frame. Only the
+            // text that is kept outside gives way to the notice (which a save takes for the
+            // kept text, `store::prepare`); a short text kept in the mailbox file stays, and the
+            // HTML stays named, going with the text as it now reads.
+            log::warn!("message {id}: its text couldn't be read ({e})");
+            kept.failed = true;
+            if kept.text.is_some() && copy.body.text.is_empty() {
+                copy.body.text = crate::store_placeholder().to_string();
+            }
+            kept.text_hash = mailcraft_model::text_hash(&copy.body.text);
+        }
+        // What came in before a part that failed is in memory all the same, and counted.
+        let brought = in_memory(&copy).saturating_sub(in_memory(m));
+        self.put_message(id, copy);
+        self.loads += 1;
+        self.used(id, brought);
+        loaded.map(|_| true)
+    }
+
+    /// Put `m`, message `id` with more or less of its content in memory, in the place of the
+    /// one the mailbox has. The one it replaces may still be held by an Undo or Redo step: the
+    /// content it keeps on disk is kept from the sweep while it is (`store::keep_held`). In a command,
+    /// the state the command started from gets it too ([`Session::run`]).
+    fn put_message(&mut self, id: Id, m: Message) {
+        let new = Arc::new(m);
+        let Some(old) = self.mailbox.messages.insert(id, new.clone()) else { return };
+        if Arc::strong_count(&old) > 1 {
+            self.hold(std::iter::once(&old));
+        }
+        if let Some(swaps) = &mut self.swaps {
+            swaps.push(Swap { id, old, new });
+        }
+    }
+
+    /// Keep what `messages` keep on disk from the sweep while something holds them.
+    fn hold<'a>(&self, messages: impl IntoIterator<Item = &'a Arc<Message>>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(path) = &self.path {
+            crate::store::keep_held(path, messages);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = messages;
+    }
+
+    /// After a command changed the mailbox: the messages of the state before it (`before`, its
+    /// Undo step) that the mailbox no longer has as they were, kept from the sweep while that
+    /// step holds them. One walk of both, in order of id.
+    fn hold_replaced(&self, before: &Mailbox) {
+        let mut now = self.mailbox.messages.iter().peekable();
+        let mut gone = Vec::new();
+        for (id, m) in &before.messages {
+            while now.peek().is_some_and(|(n, _)| *n < id) {
+                now.next();
+            }
+            if !now.peek().is_some_and(|(n, x)| *n == id && Arc::ptr_eq(x, m)) {
+                gone.push(m);
+            }
+        }
+        self.hold(gone);
+    }
+
+    /// Message `id` was just used, with `brought` more bytes in memory: it goes to the back of
+    /// the line, and what is past the budget at the front goes back to disk.
+    fn used(&mut self, id: Id, brought: u64) {
+        let mut bytes = brought;
+        if let Some(at) = self.resident.iter().position(|(r, _)| *r == id)
+            && let Some((_, before)) = self.resident.remove(at)
+        {
+            bytes = bytes.saturating_add(before);
+        }
+        if bytes == 0 {
+            return;
+        }
+        self.resident.push_back((id, bytes));
+        self.resident_bytes = self.resident_bytes.saturating_add(brought);
+        self.evict(id);
+    }
+
+    /// Let go of content brought into messages, the longest unused first, until what is kept is
+    /// within [`Session::loaded_budget`]. Only what the mailbox file names as it is, and so is
+    /// on disk, goes (`store::evictable`); a message shown or picked (or `keep`) stays, and so
+    /// does one that can't go yet (changed since the last save, or the file busy being written):
+    /// it keeps its place in the line and is tried again at a later load. A few tries a load.
+    fn evict(&mut self, keep: Id) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(path) = self.path.clone() else { return };
+            let mut tries = self.resident.len().min(EVICT_TRIES);
+            while self.resident_bytes > self.loaded_budget && tries > 0 {
+                tries -= 1;
+                let Some((id, bytes)) = self.resident.pop_front() else { break };
+                let Some(m) = self.mailbox.messages.get(&id) else {
+                    // Gone from the mailbox: nothing of it is kept here any more.
+                    self.resident_bytes = self.resident_bytes.saturating_sub(bytes);
+                    continue;
+                };
+                let lean = if id == keep || self.sel.messages.contains(&id) { None } else { crate::store::evictable(&path, id, m) };
+                // A search under way has what it is looking for matched first: its body is
+                // about to be named only, and the list reads it after this.
+                let hit = lean.as_ref().and(self.search_pass.as_ref()).map(|(q, _)| q.matches(m, self.offset_at(m.date)));
+                if let (Some(hit), Some((_, hits))) = (hit, &mut self.search_pass) {
+                    hits.insert(id, hit);
+                }
+                match lean {
+                    Some(lean) => {
+                        self.put_message(id, lean);
+                        self.resident_bytes = self.resident_bytes.saturating_sub(bytes);
+                        self.loads += 1;
+                    }
+                    None => self.resident.push_back((id, bytes)),
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = keep;
+    }
+
+    /// How many bytes brought into messages this session keeps there now.
+    pub fn resident_bytes(&self) -> u64 {
+        self.resident_bytes
+    }
+
+    /// Bring everything of message `id` into memory ([`Session::load_where`]).
+    pub fn load_message(&mut self, id: Id) -> Result<bool, CmdError> {
+        self.load_where(id, |_| true)
+    }
+
+    /// Bring in what showing message `id` needs: its body, the pictures its HTML shows in place
+    /// (`cid:`), and any calendar part (an invitation's bar reads it). Other attachments wait
+    /// until they are opened or saved. What fails is said once: the message isn't asked for again
+    /// ([`Session::needs_load_for_display`]) until the mailbox is opened anew.
+    pub fn load_for_display(&mut self, id: Id) -> Result<bool, CmdError> {
+        let loaded = self.load_for_display_once(id);
+        if loaded.is_err() {
+            self.display_failed.insert(id);
+        }
+        loaded
+    }
+
+    fn load_for_display_once(&mut self, id: Id) -> Result<bool, CmdError> {
+        // The body first: which pictures are shown is in its HTML.
+        let body = self.load_where(id, |_| false)?;
+        let Some(m) = self.mailbox.message(id) else { return Ok(body) };
+        let html = m.body.html.clone().unwrap_or_default();
+        let parts = self.load_where(id, move |a| is_readable_calendar_part(a) || shown_in(&html, a))?;
+        Ok(body || parts)
+    }
+
+    /// Whether showing message `id` would bring anything into memory ([`Session::load_for_display`]).
+    pub fn needs_load_for_display(&self, id: Id) -> bool {
+        let Some(m) = self.mailbox.message(id).filter(|_| !self.display_failed.contains(&id)) else { return false };
+        if m.body_is_kept() {
+            return true;
+        }
+        let html = m.body.html.as_deref().unwrap_or("");
+        m.attachments.iter().any(|a| !a.is_loaded() && (is_readable_calendar_part(a) || shown_in(html, a)))
+    }
+
+    /// The whole mailbox with every part in memory, as a self-contained file needs it (File ›
+    /// Save As, an export, saving to another place): a copy when anything had to be fetched. An
+    /// error names the message whose content couldn't be read.
+    pub fn loaded_mailbox(&self) -> Result<Mailbox, CmdError> {
+        let mut mailbox = self.mailbox.clone();
+        for (id, m) in &self.mailbox.messages {
+            if !m.is_loaded() {
+                mailbox.messages.insert(*id, self.loaded_message(*id)?);
+            }
+        }
+        Ok(mailbox)
+    }
+
+    /// The messages of the Outbox `outbox` holds, whole, for a synchronisation to send: a
+    /// message whose content can't be read is left out of this run, with a line in the log,
+    /// rather than sent without its files.
+    pub fn loaded_outbox(&self, outbox: Vec<Message>) -> Vec<Message> {
+        outbox
+            .into_iter()
+            .filter_map(|m| {
+                if m.is_loaded() {
+                    return Some(m);
+                }
+                match self.loaded_message(m.id) {
+                    Ok(loaded) => Some(Message::clone(&loaded)),
+                    Err(e) => {
+                        log::warn!("message {} stays in the Outbox this time: {e}", m.id);
+                        None
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Before the list is built for a search that reads bodies: the bodies it lacks of the
+    /// messages the word index didn't answer for (`decided`), newest first, within [`Session::search_time`]; the rest are counted as not searched. Bringing them
+    /// in keeps within [`Session::loaded_budget`], so a body may be let go of again before the
+    /// list is built: each is matched before it goes, and what is returned says whether it did
+    /// (for [`crate::list::rows_with`]).
+    fn load_bodies_for_search(&mut self, decided: &std::collections::HashMap<Id, bool>) -> std::collections::HashMap<Id, bool> {
+        self.unsearched = 0;
+        self.search_pass = None;
+        let query = mailcraft_model::search::Query::parse(&self.view.search);
+        if query.is_empty() || !query.reads_bodies() {
+            return Default::default();
+        }
+        // The messages the list looks at (`list::rows`) that the word index didn't answer for.
+        let in_view = crate::list::in_view(self);
+        let mut wanted: Vec<(Timestamp, Id)> = self
+            .mailbox
+            .messages
+            .values()
+            .filter(|m| in_view(m) && m.body_is_kept() && !decided.contains_key(&m.id))
+            .map(|m| (m.date, m.id))
+            .collect();
+        drop(in_view);
+        if wanted.is_empty() {
+            return Default::default();
+        }
+        wanted.sort_unstable_by(|a, b| b.cmp(a));
+        // The browser has no clock to time it by (and keeps every body in memory anyway); a
+        // deadline past what the clock can say is none.
+        #[cfg(not(target_arch = "wasm32"))]
+        let deadline = std::time::Instant::now().checked_add(self.search_time);
+        let out_of_time = || {
+            #[cfg(not(target_arch = "wasm32"))]
+            let out = deadline.is_some_and(|d| std::time::Instant::now() >= d);
+            #[cfg(target_arch = "wasm32")]
+            let out = false;
+            out
+        };
+        let mut left = wanted.len();
+        self.search_pass = Some((query, Default::default()));
+        for (_, id) in wanted {
+            if out_of_time() {
+                break;
+            }
+            // A body that can't be read says so in its place, and is not asked for again.
+            let _ = self.load_where(id, |_| false);
+            left = left.saturating_sub(1);
+        }
+        self.unsearched = left;
+        // Kept: what is let go of until the list changes is matched before it goes, too.
+        self.search_pass.as_ref().map(|(_, hits)| hits.clone()).unwrap_or_default()
     }
 
     /// Keep the view and the selection pointing at things that exist.
@@ -725,9 +1406,31 @@ impl Session {
         self.normalize();
     }
 
+    /// The mailbox file holds the mailbox as it is now (it was just saved, or nothing changed
+    /// since it was opened or saved): the messages being moved out of a Microsoft account that
+    /// are whole are whole in the file, and the server's copies may go (R3 spec S19). A host
+    /// that saves by other means than `file.save` calls this when a save of the mailbox as it is
+    /// now succeeded; the engine also notes it whenever it sees nothing unsaved.
+    pub fn note_saved(&mut self) {
+        let whole = self.mailbox.messages.values().filter(|m| m.moving_out.is_some() && !m.unfetched).map(|m| m.id);
+        self.saved_whole.extend(whole);
+        self.saved_whole.retain(|id| self.mailbox.messages.get(id).is_some_and(|m| m.moving_out.is_some()));
+    }
+
+    /// Whether the mailbox file is known to hold the mailbox as it is now.
+    pub(crate) fn file_is_current(&self) -> bool {
+        self.path.is_some() && !self.dirty
+    }
+
     /// Replace the mailbox (File › New, File › Open): history and selection start over.
     pub fn replace_mailbox(&mut self, mailbox: Mailbox) {
         self.mailbox = mailbox;
+        self.resident.clear();
+        self.resident_bytes = 0;
+        self.display_failed.clear();
+        self.search_pass = None;
+        self.searched_for = None;
+        self.saved_whole.clear();
         self.history.clear();
         self.redo.clear();
         self.sel = Selection::default();
@@ -742,7 +1445,7 @@ impl Session {
     // ---- undo ----
 
     fn snapshot(&self, label: &'static str) -> Undo {
-        Undo { label, mailbox: self.mailbox.clone(), sel: self.sel.clone(), folder: self.view.folder }
+        Undo { label, mailbox: self.mailbox.clone(), touched: Default::default(), sel: self.sel.clone(), folder: self.view.folder }
     }
 
     pub fn can_undo(&self) -> bool {
@@ -791,13 +1494,23 @@ impl Session {
         settle(&mut self.redo, before, &self.mailbox, account);
     }
 
+    /// What the last undo or redo couldn't do, in words (empty when it did everything).
+    pub fn undo_said(&self) -> &[String] {
+        &self.undo_said
+    }
+
+    /// Go to the mailbox of `u`. A Microsoft account's mail stays in step with its server: what
+    /// the server last said is kept, so the next run sends the reverse ([`crate::undo`]).
     fn swap(&mut self, u: Undo) -> Undo {
-        let cur = Undo {
-            label: u.label,
-            mailbox: std::mem::replace(&mut self.mailbox, u.mailbox),
-            sel: std::mem::replace(&mut self.sel, u.sel),
-            folder: self.view.folder,
-        };
+        let now = std::mem::take(&mut self.mailbox);
+        let (back, said) = crate::undo::keep_in_step(u.mailbox, &u.touched, &now);
+        // Undone, the step is to be done again from here: what that does is the way back.
+        let touched = crate::undo::touched(&now, &back);
+        self.mailbox = back;
+        self.undo_said = said;
+        // Where each message is, is looked at afresh.
+        self.graph_index = Default::default();
+        let cur = Undo { label: u.label, mailbox: now, touched, sel: std::mem::replace(&mut self.sel, u.sel), folder: self.view.folder };
         self.view.folder = u.folder;
         self.rev += 1;
         self.dirty = true;
@@ -848,7 +1561,22 @@ impl Session {
         let view = self.view.clone();
         let run = spec.run;
         // Last-resort guard (never-crash): a panic in a command becomes an error and the state is restored.
+        let outer = self.swaps.replace(Swaps::default());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self, params)));
+        // Content the command brought in or let go of is in the state it started from too: it
+        // is no change to undo, and a command that fails keeps it (and what is counted of it).
+        let swaps = std::mem::replace(&mut self.swaps, outer).unwrap_or_default();
+        let mut before = before;
+        for swap in &swaps.list {
+            if before.mailbox.messages.get(&swap.id).is_some_and(|m| Arc::ptr_eq(m, &swap.old)) {
+                before.mailbox.messages.insert(swap.id, swap.new.clone());
+            }
+        }
+        if let Some(outer) = &mut self.swaps {
+            for swap in swaps.list {
+                outer.push(swap);
+            }
+        }
         let result = match result {
             Ok(r) => r,
             Err(_) => {
@@ -856,12 +1584,23 @@ impl Session {
                 Err(CmdError::Failed(format!("{} failed unexpectedly; nothing was changed", spec.label)))
             }
         };
+        // An agent's command that did more than it was allowed (mail into an Outbox, messages
+        // gone for good) is undone, whatever path it took there.
+        let result = match (result, &self.agent) {
+            (Ok(_), Some(allow)) if let Some(c) = crate::agent::overstep(&before.mailbox, &self.mailbox, allow) => {
+                Err(CmdError::Failed(crate::agent::needs_owner(id, c, "do more than an agent is allowed to; nothing was changed")))
+            }
+            (r, _) => r,
+        };
         match &result {
             Ok(_) => {
                 if self.mailbox != before.mailbox {
+                    self.hold_replaced(&before.mailbox);
                     self.rev += 1;
                     if history {
                         self.dirty = true;
+                        let mut before = before;
+                        before.touched = crate::undo::touched(&before.mailbox, &self.mailbox);
                         self.history.push(before);
                         if self.history.len() > MAX_HISTORY {
                             self.history.remove(0);
@@ -885,3 +1624,65 @@ impl Session {
         result
     }
 }
+
+/// Whether an attachment is a calendar part (an invitation, an answer to one).
+pub(crate) fn is_calendar_part(a: &Attachment) -> bool {
+    let kind = a.mime.trim().to_ascii_lowercase();
+    kind.starts_with("text/calendar") || kind.starts_with("application/ics") || a.name.to_ascii_lowercase().ends_with(".ics")
+}
+
+/// A calendar part small enough to be read ([`MAX_CALENDAR_PART`]), by its size before it is
+/// brought in.
+pub(crate) fn is_readable_calendar_part(a: &Attachment) -> bool {
+    is_calendar_part(a) && a.size() <= MAX_CALENDAR_PART
+}
+
+/// Whether `html` shows the picture `a` in place (`cid:`).
+fn shown_in(html: &str, a: &Attachment) -> bool {
+    !a.content_id.is_empty() && html.contains(&format!("cid:{}", a.content_id))
+}
+
+/// Bring the body of `m` and the attachments `pick` chooses into it, through `fetch`. Stops at
+/// the first part that can't be read, with the message changed as far as it got.
+fn loaded_into(m: &mut Message, fetch: impl Fn(Part) -> Result<Arc<Vec<u8>>, CmdError>, pick: &impl Fn(&Attachment) -> bool) -> Result<(), CmdError> {
+    if m.body_is_kept()
+        && let Some(kept) = m.kept.as_deref().copied()
+    {
+        let text = kept.text.filter(|_| m.body.text.is_empty()).map(|_| fetch(Part::Text)).transpose()?;
+        let html = kept.html.filter(|_| m.body.html.is_none()).map(|_| fetch(Part::Html)).transpose()?;
+        if let Some(text) = text {
+            m.body.text = text_of(&text);
+        }
+        if let Some(html) = html {
+            m.body.html = Some(text_of(&html));
+        }
+        m.kept = None;
+    }
+    for i in 0..m.attachments.len() {
+        let Some(a) = m.attachments.get(i) else { break };
+        if a.is_loaded() || !pick(a) {
+            continue;
+        }
+        let bytes = fetch(Part::Attachment(i))?;
+        if let Some(a) = m.attachments.get_mut(i) {
+            a.data = bytes;
+            a.kept = None;
+        }
+    }
+    Ok(())
+}
+
+/// How many bytes of a message's body and attachments are in memory.
+fn in_memory(m: &Message) -> u64 {
+    let body = m.body.text.len().saturating_add(m.body.html.as_ref().map_or(0, String::len));
+    m.attachments.iter().fold(body as u64, |n, a| n.saturating_add(a.data.len() as u64))
+}
+
+/// Bytes as the text they hold; what isn't UTF-8 is read as well as it can be.
+fn text_of(bytes: &[u8]) -> String {
+    String::from_utf8(bytes.to_vec()).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod tests;

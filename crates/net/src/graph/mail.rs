@@ -20,12 +20,17 @@
 //!   and all: the tree comes from where each folder was found, never from splitting a name.
 //!   A listing that doesn't get to its end says so ([`FolderListing::complete`]), and then
 //!   nothing is removed for being missing from it.
+//! - **A shared mailbox** (#70) is asked at `/users/{address}/…` for all of it: its changes, its
+//!   drafts (in its own Drafts) and what is sent from it (the copy in its own Sent Items). A
+//!   refusal of its by Graph's code (no access, no mailbox) stops its changes, drafts and sends,
+//!   which wait here; one is never taken for a folder or a message that is gone.
 //! - **What comes back is hostile JSON.** Every list, id and name is capped; an entry that
 //!   can't be read is passed over (and makes the listing incomplete); nothing in it is run or
 //!   fetched. No folder's name or id goes into an error or a log line.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use mailcraft_model::sync::{
     ChangeOutcome, FolderChange, FolderChangeDone, FolderListing, GraphFolder, GraphMailRequest, GraphMailResult, MAX_FOLDER_CHANGES,
@@ -39,9 +44,8 @@ use super::{ASK_TIMEOUT, BATCH, BATCH_SIZE, Doing, Graph, IMMUTABLE_IDS, MAX_BAT
 use crate::NetError;
 use crate::http::{self, Reply};
 
-const MAIL_FOLDERS: &str = "/v1.0/me/mailFolders";
 /// What is asked for of each folder: no more comes down than is used.
-const FOLDER_FIELDS: &str = "id,displayName,parentFolderId,childFolderCount,isHidden";
+const FOLDER_FIELDS: &str = "id,displayName,parentFolderId,childFolderCount,isHidden,totalItemCount,unreadItemCount";
 /// Folders asked for per page.
 const FOLDER_PAGE: &str = "100";
 /// Deepest a folder is followed (the mailbox's own limit).
@@ -68,11 +72,66 @@ pub fn sync_folders(token: &str, request: &GraphMailRequest) -> GraphMailResult 
     sync_folders_with(&graph_base(), token, request, Gate::for_mailbox(&request.email), Retry::STANDARD)
 }
 
+/// A whole run for a Microsoft account (R3.1, R3.2): the folders as [`sync_folders`] has them,
+/// then every folder's mail ([`down`]). It comes in pieces through `emit`, each to be taken in as
+/// it comes (the folders first, then a page at a time); the last has [`GraphMailResult::partial`]
+/// false. `cancel` stops it after the page in hand.
+pub fn sync_mail(token: &str, request: &GraphMailRequest, cancel: &AtomicBool, emit: &mut dyn FnMut(GraphMailResult)) {
+    sync_mail_with(&graph_base(), token, request, Gate::for_mailbox(&request.email), Retry::STANDARD, cancel, emit);
+}
+
+/// [`sync_mail`] at `base`, through `gate`, asking again as `retry` says.
+pub(crate) fn sync_mail_with(
+    base: &str,
+    token: &str,
+    request: &GraphMailRequest,
+    gate: Arc<Gate>,
+    retry: Retry,
+    cancel: &AtomicBool,
+    emit: &mut dyn FnMut(GraphMailResult),
+) {
+    let mut folders = sync_folders_with(base, token, request, gate.clone(), retry);
+    // No listing, or a server that wants to be left alone: that is the run.
+    let listed = match &folders.listing {
+        Some(listing) if folders.busy_for.is_none() => listing.folders.clone(),
+        _ => return emit(folders),
+    };
+    folders.partial = true;
+    emit(folders);
+    let priority = if request.background { Priority::Background } else { Priority::Owner };
+    let last = match Graph::for_mail(base, token, gate, priority, retry).and_then(|graph| graph.of_shared(shared_address(request))) {
+        Ok(graph) => down::messages(&graph, request, &listed, cancel, emit),
+        Err(e) => GraphMailResult {
+            account: request.account,
+            email: request.email.clone(),
+            errors: vec![format!("Couldn't reach Microsoft for the mail: {e}")],
+            ..Default::default()
+        },
+    };
+    emit(last);
+}
+
+/// Every piece of a run of [`sync_mail_with`] put together, in order: what a caller that takes a
+/// run in at once gets.
+#[cfg(test)]
+pub(crate) fn whole_run(
+    base: &str,
+    token: &str,
+    request: &GraphMailRequest,
+    gate: Arc<Gate>,
+    retry: Retry,
+    cancel: &AtomicBool,
+) -> Vec<GraphMailResult> {
+    let mut pieces = Vec::new();
+    sync_mail_with(base, token, request, gate, retry, cancel, &mut |piece| pieces.push(piece));
+    pieces
+}
+
 /// [`sync_folders`] at `base`, through `gate`, asking again as `retry` says.
 pub(crate) fn sync_folders_with(base: &str, token: &str, request: &GraphMailRequest, gate: Arc<Gate>, retry: Retry) -> GraphMailResult {
     let mut out = GraphMailResult { account: request.account, email: request.email.clone(), ..Default::default() };
     let priority = if request.background { Priority::Background } else { Priority::Owner };
-    let graph = match Graph::for_mail(base, token, gate.clone(), priority, retry) {
+    let graph = match Graph::for_mail(base, token, gate.clone(), priority, retry).and_then(|graph| graph.of_shared(shared_address(request))) {
         Ok(graph) => graph,
         Err(e) => {
             out.errors.push(format!("Couldn't reach Microsoft for the folders: {e}"));
@@ -82,6 +141,13 @@ pub(crate) fn sync_folders_with(base: &str, token: &str, request: &GraphMailRequ
     let stop = |out: &mut GraphMailResult, e: &NetError| {
         if let NetError::Busy { retry_after, .. } = e {
             out.busy_for = Some(retry_after.unwrap_or(0).max(gate.paused_for().map_or(0, |left| u32::try_from(left.as_secs()).unwrap_or(u32::MAX))));
+        }
+        // A shared mailbox the owner may not open (#70): said as it is, and not asked again by
+        // itself.
+        if let NetError::SharedRefused(why) = e {
+            out.refused = Some(*why);
+            out.errors.push(format!("{}.", why.said()));
+            return;
         }
         out.errors.push(format!("Couldn't bring the folders in step with Microsoft: {e}"));
     };
@@ -93,6 +159,9 @@ pub(crate) fn sync_folders_with(base: &str, token: &str, request: &GraphMailRequ
             return out;
         }
     };
+    // A shared mailbox's changes, drafts and sends go up at its own address, as the owner's do at
+    // his (#70): every path below comes of `graph`, which names that mailbox.
+    let (drafts, sends) = (&request.drafts[..], &request.sends[..]);
     // What was changed here goes up first: the listing then shows the server after it.
     let mut made: HashMap<u64, String> = HashMap::new();
     for change in request.changes.iter().take(MAX_FOLDER_CHANGES) {
@@ -110,11 +179,66 @@ pub(crate) fn sync_folders_with(base: &str, token: &str, request: &GraphMailRequ
                 log::info!("graph folders: a change got no answer; the rest wait for the next run");
                 let token_refused = e.is_refused_sign_in();
                 stop(&mut out, &e);
-                if token_refused || matches!(e, NetError::Busy { .. }) {
+                if token_refused || matches!(e, NetError::Busy { .. } | NetError::SharedRefused(_)) {
                     return out;
                 }
                 break;
             }
+        }
+    }
+    // Then the changes of messages, which may go into a folder just made (R3 spec S16).
+    match up::messages(&graph, &made, &request.messages, &mut out.messages) {
+        Ok(0) => {}
+        // A shared mailbox that refused some of them (#70): they wait here, and the owner is told.
+        Ok(1) => out.errors.push("Microsoft refused a change made in this shared mailbox; it waits on this computer.".into()),
+        Ok(held) => out.errors.push(format!("Microsoft refused {held} changes made in this shared mailbox; they wait on this computer.")),
+        // One that won't let the owner in: said as it is, and the rest wait.
+        Err(e @ NetError::SharedRefused(_)) => {
+            log::info!("graph changes: the shared mailbox refused the owner; the changes wait for the next run");
+            stop(&mut out, &e);
+            return out;
+        }
+        Err(e) => {
+            log::info!("graph changes: the changes of messages stopped; the rest wait for the next run");
+            if let NetError::Busy { retry_after, .. } = &e {
+                out.busy_for =
+                    Some(retry_after.unwrap_or(0).max(gate.paused_for().map_or(0, |left| u32::try_from(left.as_secs()).unwrap_or(u32::MAX))));
+            }
+            out.errors.push(format!("Couldn't send the changes of messages to Microsoft: {e}"));
+            if e.is_refused_sign_in() || matches!(e, NetError::Busy { .. }) {
+                return out;
+            }
+        }
+    }
+    // Then the drafts saved here (R3.4.1).
+    if let Err(e) = drafts::drafts(&graph, drafts, &mut out.drafts) {
+        log::info!("graph drafts: the drafts stopped; the rest wait for the next run");
+        // A shared mailbox that won't let the owner in (#70): said as it is, and the rest wait.
+        if let NetError::SharedRefused(_) = e {
+            stop(&mut out, &e);
+            return out;
+        }
+        if let NetError::Busy { retry_after, .. } = &e {
+            out.busy_for = Some(retry_after.unwrap_or(0).max(gate.paused_for().map_or(0, |left| u32::try_from(left.as_secs()).unwrap_or(u32::MAX))));
+        }
+        out.errors.push(format!("Couldn't save the drafts on Microsoft's server: {e}"));
+        if e.is_refused_sign_in() || matches!(e, NetError::Busy { .. }) {
+            return out;
+        }
+    }
+    // Then what waits in the Outbox (R3.4.2): never asked twice by itself.
+    if let Err(e) = send::sends(&graph, sends, &mut out.sent) {
+        log::info!("graph sending: sending stopped; the rest waits for the next run");
+        if let NetError::SharedRefused(_) = e {
+            stop(&mut out, &e);
+            return out;
+        }
+        if let NetError::Busy { retry_after, .. } = &e {
+            out.busy_for = Some(retry_after.unwrap_or(0).max(gate.paused_for().map_or(0, |left| u32::try_from(left.as_secs()).unwrap_or(u32::MAX))));
+        }
+        out.errors.push(format!("Couldn't send through Microsoft: {e}"));
+        if e.is_refused_sign_in() || matches!(e, NetError::Busy { .. }) {
+            return out;
         }
     }
     match listing(&graph, &known) {
@@ -133,6 +257,11 @@ pub(crate) fn sync_folders_with(base: &str, token: &str, request: &GraphMailRequ
     out
 }
 
+/// The shared mailbox a request is for, when it is for one (#70).
+fn shared_address(request: &GraphMailRequest) -> Option<&str> {
+    request.shared.then_some(request.email.as_str())
+}
+
 /// The server's ids of the top of the mailbox and of the special folders.
 #[derive(Debug, Default)]
 struct Known {
@@ -145,6 +274,11 @@ impl Known {
     fn parent_here(&self, parent: &str) -> String {
         if parent == self.root { String::new() } else { parent.to_string() }
     }
+}
+
+/// Where the folders of the mailbox are: `/v1.0/me/mailFolders`, or a shared mailbox's (#70).
+fn folders(graph: &Graph<'_>) -> String {
+    graph.mail_path("/mailFolders")
 }
 
 /// An id as the server writes one: visible ASCII, not too long.
@@ -161,7 +295,7 @@ fn well_known(graph: &Graph<'_>) -> Result<Known, NetError> {
     let requests: Vec<Value> = WELL_KNOWN
         .iter()
         .enumerate()
-        .map(|(n, (name, _))| json!({"id": n.to_string(), "method": "GET", "url": format!("/me/mailFolders/{name}?{select}"), "headers": {"Prefer": IMMUTABLE_IDS}}))
+        .map(|(n, (name, _))| json!({"id": n.to_string(), "method": "GET", "url": graph.batch_path(&format!("/mailFolders/{name}?{select}")), "headers": {"Prefer": IMMUTABLE_IDS}}))
         .collect();
     let body = json!({"requests": requests}).to_string();
     let reply = graph.call(Kind::Read, &graph.url(BATCH), "POST", &[("Content-Type", "application/json")], Some(&body), ASK_TIMEOUT, MAX_BATCH)?;
@@ -172,7 +306,14 @@ fn well_known(graph: &Graph<'_>) -> Result<Known, NetError> {
         for one in said.iter().take(BATCH_SIZE * 2) {
             let n = one.get("id").and_then(Value::as_str).and_then(|n| n.parse::<usize>().ok());
             let Some(slot) = n.and_then(|n| answers.get_mut(n)) else { continue };
-            *slot = match one.get("status").and_then(Value::as_u64) {
+            let status = one.get("status").and_then(Value::as_u64);
+            // A shared mailbox that isn't to be opened says so in every answer (#70).
+            if graph.shared()
+                && let Some(why) = super::shared_refusal(status.unwrap_or(0), one.get("body").unwrap_or(&Value::Null))
+            {
+                return Err(NetError::SharedRefused(why));
+            }
+            *slot = match status {
                 Some(200) => one.get("body").map(|body| id_of(text(body, "id"))).filter(Option::is_some),
                 // The mailbox has no such folder (an Archive, say).
                 Some(404) => Some(None),
@@ -184,8 +325,13 @@ fn well_known(graph: &Graph<'_>) -> Result<Known, NetError> {
     }
     // What the batch didn't settle, one at a time.
     for ((name, _), slot) in WELL_KNOWN.iter().zip(answers.iter_mut()).filter(|(_, slot)| slot.is_none()) {
-        let url = graph.url(&format!("{MAIL_FOLDERS}/{name}?{select}"));
+        let url = graph.url(&format!("{}/{name}?{select}", folders(graph)));
         let reply = graph.call(Kind::Read, &url, "GET", &[], None, ASK_TIMEOUT, MAX_PAGE)?;
+        if graph.shared()
+            && let Some(why) = super::shared_refusal(u64::from(reply.status), &serde_json::from_slice::<Value>(&reply.body).unwrap_or(Value::Null))
+        {
+            return Err(NetError::SharedRefused(why));
+        }
         *slot = match reply.status {
             200 => {
                 let json = serde_json::from_slice::<Value>(&reply.body).unwrap_or(Value::Null);
@@ -206,6 +352,10 @@ fn well_known(graph: &Graph<'_>) -> Result<Known, NetError> {
         }
     }
     if known.root.is_empty() {
+        // For a shared mailbox, that is Graph having no mailbox there for the owner (#70).
+        if graph.shared() {
+            return Err(NetError::SharedRefused(mailcraft_model::sync::SharedRefusal::NoMailbox));
+        }
         return Err(nonsense("Microsoft Graph didn't say where the top of the mailbox is"));
     }
     Ok(known)
@@ -219,6 +369,9 @@ pub(crate) struct Entry {
     pub name: String,
     pub children: u64,
     pub unseen: bool,
+    /// How many messages it has, and how many are unread (0 when not said).
+    pub total: u32,
+    pub unread: u32,
 }
 
 /// [`Entry`] of one JSON value of a list, or of the answer to a change.
@@ -229,7 +382,8 @@ pub(crate) fn entry_of(value: &Value) -> Option<Entry> {
     let children = value.get("childFolderCount").map_or(Some(1), Value::as_u64)?;
     let hidden = value.get("isHidden").and_then(Value::as_bool).unwrap_or(false);
     let search = text(value, "@odata.type").to_ascii_lowercase().contains("mailsearchfolder");
-    Some(Entry { id, name, children, unseen: hidden || search })
+    let count = |name: &str| value.get(name).and_then(Value::as_u64).map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX));
+    Some(Entry { id, name, children, unseen: hidden || search, total: count("totalItemCount"), unread: count("unreadItemCount") })
 }
 
 /// Every folder of the mailbox, parents first. A listing that was cut short comes back as far
@@ -242,9 +396,9 @@ fn listing(graph: &Graph<'_>, known: &Known) -> Result<FolderListing, (FolderLis
     let mut queue: VecDeque<(String, usize)> = VecDeque::from([(String::new(), 0)]);
     while let Some((parent, depth)) = queue.pop_front() {
         let path = if parent.is_empty() {
-            format!("{MAIL_FOLDERS}?{query}")
+            format!("{}?{query}", folders(graph))
         } else {
-            format!("{MAIL_FOLDERS}/{}/childFolders?{query}", http::encode(&parent))
+            format!("{}/{}/childFolders?{query}", folders(graph), http::encode(&parent))
         };
         let mut found: Vec<Entry> = Vec::new();
         let mut unreadable = 0usize;
@@ -285,7 +439,7 @@ fn listing(graph: &Graph<'_>, known: &Known) -> Result<FolderListing, (FolderLis
                 }
             }
             let kind = known.kinds.get(&entry.id).copied().unwrap_or_default();
-            out.folders.push(GraphFolder { id: entry.id, parent: parent.clone(), name: entry.name, kind });
+            out.folders.push(GraphFolder { id: entry.id, parent: parent.clone(), name: entry.name, kind, total: entry.total, unread: entry.unread });
         }
     }
     Ok(out)
@@ -308,10 +462,11 @@ fn make_change(graph: &Graph<'_>, known: &Known, made: &HashMap<u64, String>, ch
                 },
                 (true, None) => String::new(),
             };
-            let path = if parent.is_empty() { MAIL_FOLDERS.to_string() } else { format!("{MAIL_FOLDERS}/{}/childFolders", http::encode(&parent)) };
+            let path = if parent.is_empty() { folders(graph) } else { format!("{}/{}/childFolders", folders(graph), http::encode(&parent)) };
             let body = json!({"displayName": name}).to_string();
             let reply =
                 graph.call(Kind::Once, &graph.url(&path), "POST", &[("Content-Type", "application/json")], Some(&body), WRITE_TIMEOUT, MAX_PAGE)?;
+            refusing(graph, &reply)?;
             match reply.status {
                 200 | 201 => Ok(Some(done(known, &reply, &parent)?)),
                 // There is one of that name there: an earlier try whose answer was lost, or one
@@ -328,8 +483,9 @@ fn make_change(graph: &Graph<'_>, known: &Known, made: &HashMap<u64, String>, ch
             let Some(name) = name_of(name) else { return Ok(Some(refused("a folder needs a name"))) };
             let id = checked(id)?;
             let body = json!({"displayName": name}).to_string();
-            let url = graph.url(&format!("{MAIL_FOLDERS}/{}", http::encode(&id)));
+            let url = graph.url(&format!("{}/{}", folders(graph), http::encode(&id)));
             let reply = graph.call(Kind::Same, &url, "PATCH", &[("Content-Type", "application/json")], Some(&body), WRITE_TIMEOUT, MAX_PAGE)?;
+            refusing(graph, &reply)?;
             match reply.status {
                 200 | 201 => Ok(Some(done_in_place(known, &reply)?)),
                 409 => Ok(Some(refused("the server has a folder of that name there"))),
@@ -341,8 +497,9 @@ fn make_change(graph: &Graph<'_>, known: &Known, made: &HashMap<u64, String>, ch
             let id = checked(id)?;
             let to = if parent.is_empty() { known.root.clone() } else { checked(parent)? };
             let body = json!({"destinationId": to}).to_string();
-            let url = graph.url(&format!("{MAIL_FOLDERS}/{}/move", http::encode(&id)));
+            let url = graph.url(&format!("{}/{}/move", folders(graph), http::encode(&id)));
             let reply = graph.call(Kind::Once, &url, "POST", &[("Content-Type", "application/json")], Some(&body), WRITE_TIMEOUT, MAX_PAGE)?;
+            refusing(graph, &reply)?;
             match reply.status {
                 200 | 201 => Ok(Some(done(known, &reply, &to)?)),
                 409 => Ok(Some(refused("the server has a folder of that name there"))),
@@ -352,8 +509,9 @@ fn make_change(graph: &Graph<'_>, known: &Known, made: &HashMap<u64, String>, ch
         }
         FolderChange::Delete { id } => {
             let id = checked(id)?;
-            let url = graph.url(&format!("{MAIL_FOLDERS}/{}", http::encode(&id)));
+            let url = graph.url(&format!("{}/{}", folders(graph), http::encode(&id)));
             let reply = graph.call(Kind::Same, &url, "DELETE", &[], None, WRITE_TIMEOUT, MAX_PAGE)?;
+            refusing(graph, &reply)?;
             match reply.status {
                 200..=299 => Ok(Some(ChangeOutcome::Done { folder: GraphFolder { id, ..Default::default() } })),
                 404 | 410 => Ok(Some(ChangeOutcome::Gone)),
@@ -361,6 +519,19 @@ fn make_change(graph: &Graph<'_>, known: &Known, made: &HashMap<u64, String>, ch
             }
         }
     }
+}
+
+/// A shared mailbox that answered a change by Graph's code with no access, no mailbox or not
+/// through Graph (#70): the run's changes stop there, waiting here, and are never taken for a
+/// folder that is gone (a 404 `ErrorInvalidUser` would be).
+fn refusing(graph: &Graph<'_>, reply: &Reply) -> Result<(), NetError> {
+    if graph.shared() && !(200..300).contains(&reply.status) {
+        let body = serde_json::from_slice::<Value>(&reply.body).unwrap_or(Value::Null);
+        if let Some(why) = super::shared_refusal(u64::from(reply.status), &body) {
+            return Err(NetError::SharedRefused(why));
+        }
+    }
+    Ok(())
 }
 
 fn refused(why: &str) -> ChangeOutcome {
@@ -372,7 +543,7 @@ fn done(known: &Known, reply: &Reply, parent: &str) -> Result<ChangeOutcome, Net
     let json = serde_json::from_slice::<Value>(&reply.body).unwrap_or(Value::Null);
     let entry = entry_of(&json).ok_or_else(|| nonsense("Microsoft Graph's answer about a folder isn't one"))?;
     let kind = known.kinds.get(&entry.id).copied().unwrap_or_default();
-    Ok(ChangeOutcome::Done { folder: GraphFolder { id: entry.id, parent: known.parent_here(parent), name: entry.name, kind } })
+    Ok(ChangeOutcome::Done { folder: GraphFolder { id: entry.id, parent: known.parent_here(parent), name: entry.name, kind, ..Default::default() } })
 }
 
 /// [`done`] for a folder that stayed where it was: the answer says where that is.
@@ -384,7 +555,15 @@ fn done_in_place(known: &Known, reply: &Reply) -> Result<ChangeOutcome, NetError
 
 /// What a status other than the hoped-for one means for a change: a refusal for good (said in
 /// plain words), or an error that stops the run's changes (busy, no sign-in).
+///
+/// In a shared mailbox (#70) a refusal never puts back what the owner changed: one that is by
+/// Graph's code no access (or no mailbox) stops the run's changes as [`NetError::SharedRefused`],
+/// and any other 403 stops them too, the change waiting here for the next run.
 fn outcome_of(graph: &Graph<'_>, reply: &Reply, sent: &str) -> Result<Option<ChangeOutcome>, NetError> {
+    refusing(graph, reply)?;
+    if graph.shared() && reply.status == 403 {
+        return Err(graph.refusal(Doing::Folders, reply, sent));
+    }
     match reply.status {
         400 => Ok(Some(refused("the server says the change isn't one it can make"))),
         403 => Ok(Some(refused("the server says this account may not make that change"))),
@@ -395,18 +574,37 @@ fn outcome_of(graph: &Graph<'_>, reply: &Reply, sent: &str) -> Result<Option<Cha
 /// The folder called `name` (in any case) in `parent` (a server id; empty: the top).
 fn child_named(graph: &Graph<'_>, known: &Known, parent: &str, name: &str) -> Result<Option<GraphFolder>, NetError> {
     let query = http::form(&[("$top", FOLDER_PAGE), ("$select", FOLDER_FIELDS)]);
-    let path =
-        if parent.is_empty() { format!("{MAIL_FOLDERS}?{query}") } else { format!("{MAIL_FOLDERS}/{}/childFolders?{query}", http::encode(parent)) };
+    let path = if parent.is_empty() {
+        format!("{}?{query}", folders(graph))
+    } else {
+        format!("{}/{}/childFolders?{query}", folders(graph), http::encode(parent))
+    };
     let mut found = None;
     let wanted = name.to_lowercase();
     graph.list(Doing::Folders, graph.url(&path), &[], MAX_LISTED_FOLDERS, &mut |value| {
         if let Some(entry) = entry_of(value).filter(|entry| found.is_none() && entry.name.to_lowercase() == wanted) {
             let kind = known.kinds.get(&entry.id).copied().unwrap_or_default();
-            found = Some(GraphFolder { id: entry.id, parent: parent.to_string(), name: entry.name, kind });
+            found = Some(GraphFolder { id: entry.id, parent: parent.to_string(), name: entry.name, kind, ..Default::default() });
         }
     })?;
     Ok(found)
 }
 
+mod down;
+mod drafts;
+mod fetch;
+mod search;
+mod send;
+mod up;
+
+pub use fetch::fetch_messages;
+pub use search::search_messages;
+
+#[cfg(test)]
+mod down_tests;
+#[cfg(test)]
+mod search_tests;
+#[cfg(test)]
+mod shared_tests;
 #[cfg(test)]
 mod tests;

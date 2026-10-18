@@ -816,3 +816,34 @@ fn this_crate_has_no_way_to_fetch_anything() {
     }
     assert!(checked >= 6, "only {checked} source files were found");
 }
+
+/// #150: the digest's 600-pixel table is centred and keeps its width; each tile's number has its
+/// icon in its line; the footer's pictures are lines of pictures.
+#[test]
+fn the_access_digest_keeps_its_centred_column_and_its_lines() {
+    let blocks = parse(ACCESS_DIGEST);
+    let shell = flat(&blocks)
+        .into_iter()
+        .find(|b| matches!(&b.kind, BlockKind::Table(t) if t.width == Some(Length::Px(600))))
+        .unwrap_or_else(|| panic!("no 600-pixel table\n{}", show(&blocks)));
+    assert_eq!(shell.align, Align::Center);
+    // Its text is where its cells put it (left), and the tiles' text is centred.
+    assert_eq!(block(&blocks, "Here is what happened").align, Align::Left);
+    assert_eq!(block(&blocks, "Roles activated").align, Align::Center);
+    // `<img> <span>3</span>` and `<p><img> 7</p>`: the number goes on in the picture's line.
+    for number in ["3", "7"] {
+        let all = flat(&blocks);
+        let at = all.iter().position(|b| b.text() == number).unwrap_or_else(|| panic!("no {number}\n{}", show(&blocks)));
+        assert!(all[at].beside && matches!(all[at - 1].kind, BlockKind::Image { .. }), "{number}\n{}", show(&blocks));
+    }
+    // The footer's line of linked pictures: one line, no blank lines between them.
+    let footer: Vec<&Block> = flat(&blocks)
+        .into_iter()
+        .filter(|b| matches!(&b.kind, BlockKind::Image { width: Some(20), link: Some(_), .. }) && b.spans.is_empty())
+        .collect();
+    assert_eq!(footer.len(), 3, "{}", show(&blocks));
+    assert!(footer.iter().skip(1).all(|b| b.space == 0 && b.beside), "{footer:?}");
+    // The table of roles gives its columns' widths.
+    let roles = table_with(&blocks, "Privileged authentication");
+    assert_eq!(roles.rows[0].cells.iter().map(|c| c.width).collect::<Vec<_>>(), [Some(Length::Percent(70)), Some(Length::Percent(30))]);
+}

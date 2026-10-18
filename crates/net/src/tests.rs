@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use mailcraft_model::sync::{Created, Deleted, FlagsPushed, FolderState, Moved, RemoteFlags, RemoteOp, SyncRequest, SyncResult};
+use mailcraft_model::sync::{
+    Created, Deleted, FlagsPushed, FolderState, Moved, RemoteFlags, RemoteOp, SyncPhase, SyncRequest, SyncResult, SyncStage,
+};
 use mailcraft_model::{Account, AccountKind, Address, FlagStatus, FolderKind, Id, Message, OAuth, Security, Server};
 use mailcraft_proto::ProtoError;
 
@@ -1177,6 +1179,152 @@ fn a_deletion_takes_the_deleted_message_and_no_other() {
     assert!(delta(&result, "INBOX").flags.iter().all(|f| f.uid != 2));
 }
 
+/// The local Archive folder of [`local_folders`].
+const ARCHIVE: Id = 104;
+
+/// A Gmail account (as Google describes it for IMAP): labels as mailboxes, and every message that
+/// is not in the trash also in all mail, which has one message archived already.
+fn gmail() -> FakeImap {
+    let inbox = vec![message(1, "\\Seen", "One"), message(2, "", "Two"), message(3, "", "Three")];
+    let mut all = inbox.clone();
+    all.push(message(4, "\\Seen", "Archived before"));
+    Fake::imap(ImapWorld {
+        user: "ada".into(),
+        password: PASSWORD.into(),
+        mailboxes: vec![
+            mailbox("INBOX", "\\HasNoChildren", 11, inbox),
+            mailbox("[Gmail]", "\\Noselect \\HasChildren", 0, Vec::new()),
+            mailbox("[Gmail]/All Mail", "\\HasNoChildren \\All", 51, all),
+            mailbox("[Gmail]/Sent Mail", "\\HasNoChildren \\Sent", 21, Vec::new()),
+            mailbox("[Gmail]/Trash", "\\HasNoChildren \\Trash", 61, Vec::new()),
+        ],
+        can_move: true,
+        uidplus: true,
+        gmail: true,
+        ..Default::default()
+    })
+}
+
+fn archiving(message: Id, uid: u32, create: &str) -> RemoteOp {
+    RemoteOp::Move { message, from: "INBOX".into(), uid, to: String::new(), to_folder: ARCHIVE, create: vec![create.into()] }
+}
+
+#[test]
+fn archiving_at_gmail_takes_the_inbox_label_away_and_makes_none() {
+    let imap = gmail();
+    let folders = without(synced_folders_of(&imap), "INBOX", &[1]);
+    // All mail is no folder here: nothing follows it, and nothing came down from it.
+    assert!(folders.iter().all(|f| !f.remote.contains("All Mail")));
+    assert_eq!(folders.iter().find(|f| f.id == ARCHIVE).map(|f| f.remote.as_str()), Some(""));
+    let downloaded = downloads(&imap);
+    let result = sync(&pushing(&imap, &folders, vec![archiving(901, 1, "Archive")]));
+    assert_eq!(result.errors, Vec::<String>::new());
+    // Out of the Inbox, and in all mail once, under the UID it has there; no label was made.
+    assert_eq!(changes(&imap), ["UID MOVE 1 \"[Gmail]/All Mail\""]);
+    assert_eq!(sent(&imap, "CREATE") + sent(&imap, "SUBSCRIBE"), 0);
+    assert_eq!(server_uids(&imap, "INBOX"), [2, 3]);
+    assert_eq!(server_uids(&imap, "[Gmail]/All Mail"), [1, 2, 3, 4]);
+    // The Archive folder follows all mail from now on; the message has its UID there.
+    assert_eq!(result.created, [Created { folder: ARCHIVE, remote: "[Gmail]/All Mail".into() }]);
+    assert_eq!(result.moved, [moved(901, "INBOX", 1, ARCHIVE, 1, 51)]);
+    assert!(remotes(&result).iter().all(|remote| !remote.contains("All Mail")));
+    assert_eq!((result.new_count(), downloads(&imap)), (0, downloaded));
+
+    // The next runs read the other mailboxes, never all mail, and archive into it by its name.
+    let mut folders = applied(&folders, &result);
+    folders.iter_mut().find(|f| f.id == ARCHIVE).unwrap().uid_validity = 51;
+    for _ in 0..2 {
+        let again = sync(&pushing(&imap, &folders, Vec::new()));
+        assert_eq!((again.errors.len(), again.new_count(), again.pushed_count(), downloads(&imap)), (0, 0, 0, downloaded));
+        assert!(remotes(&again).iter().all(|remote| !remote.contains("All Mail")));
+        assert!(again.folders.iter().all(|f| f.removed.is_empty()));
+    }
+    let folders = without(folders, "INBOX", &[2]);
+    let result = sync(&pushing(&imap, &folders, vec![moving(902, "INBOX", 2, "[Gmail]/All Mail", ARCHIVE)]));
+    assert_eq!((result.errors.len(), result.created.len()), (0, 0));
+    assert_eq!(result.moved, [moved(902, "INBOX", 2, ARCHIVE, 2, 51)]);
+    assert_eq!(server_uids(&imap, "INBOX"), [3]);
+    assert_eq!(server_uids(&imap, "[Gmail]/All Mail"), [1, 2, 3, 4]);
+
+    // Back to the Inbox: the label is added again, and the message is still in all mail.
+    let result = sync(&pushing(
+        &imap,
+        &folders,
+        vec![RemoteOp::Move { message: 901, from: "[Gmail]/All Mail".into(), uid: 1, to: "INBOX".into(), to_folder: 100, create: Vec::new() }],
+    ));
+    assert_eq!(result.errors, Vec::<String>::new());
+    assert_eq!(result.moved, [moved(901, "[Gmail]/All Mail", 1, 100, 4, 11)]);
+    assert_eq!(server_uids(&imap, "INBOX"), [3, 4]);
+    assert_eq!(server_uids(&imap, "[Gmail]/All Mail"), [1, 2, 3, 4]);
+    assert_eq!(sent(&imap, "CREATE"), 0);
+}
+
+#[test]
+fn deleting_for_good_at_gmail_goes_through_the_trash() {
+    let imap = gmail();
+    let mut folders = without(synced_folders_of(&imap), "INBOX", &[2]);
+    // One archived before, which this folder follows all mail for.
+    let archive = folders.iter_mut().find(|f| f.id == ARCHIVE).unwrap();
+    (archive.remote, archive.uid_validity, archive.known_uids) = ("[Gmail]/All Mail".into(), 51, vec![4]);
+    let folders = without(folders, "[Gmail]/All Mail", &[4]);
+    let result = sync(&pushing(&imap, &folders, vec![deleting("INBOX", 2), deleting("[Gmail]/All Mail", 4)]));
+    assert_eq!(result.errors, Vec::<String>::new());
+    assert_eq!(result.deleted, [deleted("INBOX", 2), deleted("[Gmail]/All Mail", 4)]);
+    assert_eq!(
+        changes(&imap),
+        [
+            "UID MOVE 2 \"[Gmail]/Trash\"",
+            "UID STORE 1 +FLAGS.SILENT (\\Deleted)",
+            "UID EXPUNGE 1",
+            "UID MOVE 4 \"[Gmail]/Trash\"",
+            "UID STORE 2 +FLAGS.SILENT (\\Deleted)",
+            "UID EXPUNGE 2",
+        ]
+    );
+    // Gone from every label, from all mail and from the trash.
+    assert_eq!(server_uids(&imap, "INBOX"), [1, 3]);
+    assert_eq!(server_uids(&imap, "[Gmail]/All Mail"), [1, 3]);
+    assert!(server_uids(&imap, "[Gmail]/Trash").is_empty());
+    assert!(never_swept(&imap));
+    // Nothing comes down for it.
+    let downloaded = downloads(&imap);
+    let again = sync(&pushing(&imap, &applied(&folders, &result), Vec::new()));
+    assert_eq!((again.errors.len(), again.new_count(), downloads(&imap)), (0, 0, downloaded));
+
+    // What is in the trash already is deleted there, as at any server.
+    let imap = gmail();
+    imap.world().mailbox("[Gmail]/Trash").messages.push(message(1, "", "Thrown away"));
+    let folders = without(synced_folders_of(&imap), "[Gmail]/Trash", &[1]);
+    let result = sync(&pushing(&imap, &folders, vec![deleting("[Gmail]/Trash", 1)]));
+    assert_eq!((result.errors.len(), result.deleted.as_slice()), (0, &[deleted("[Gmail]/Trash", 1)][..]));
+    assert_eq!(changes(&imap), ["UID STORE 1 +FLAGS.SILENT (\\Deleted)", "UID EXPUNGE 1"]);
+}
+
+#[test]
+fn a_server_that_is_not_gmail_keeps_its_ways_with_all_mail() {
+    // All mail, but no word that the server is Gmail's: Archive is made, and a deletion is in place.
+    let imap = two_way(true, true);
+    let folders = without(synced_folders(&imap), "INBOX", &[1, 2]);
+    let result = sync(&pushing(&imap, &folders, vec![archiving(901, 1, "Archive"), deleting("INBOX", 2)]));
+    assert_eq!(result.errors, Vec::<String>::new());
+    assert_eq!(result.created, [Created { folder: ARCHIVE, remote: "Archive".into() }]);
+    assert_eq!(
+        changes(&imap),
+        ["CREATE \"Archive\"", "SUBSCRIBE \"Archive\"", "UID MOVE 1 \"Archive\"", "UID STORE 2 +FLAGS.SILENT (\\Deleted)", "UID EXPUNGE 2"]
+    );
+    assert_eq!(server_uids(&imap, "[Gmail]/All Mail"), [1]);
+
+    // Gmail with a mailbox for archived mail of its own (made by the owner, or by an earlier
+    // version): that one is used, as before.
+    let imap = gmail();
+    imap.world().mailboxes.push(mailbox("Archive", "\\HasNoChildren", 71, Vec::new()));
+    let folders = without(synced_folders_of(&imap), "INBOX", &[1]);
+    let archive = folders.iter().find(|f| f.id == ARCHIVE).unwrap();
+    assert_eq!((archive.remote.as_str(), archive.uid_validity), ("Archive", 71));
+    let result = sync(&pushing(&imap, &folders, vec![moving(901, "INBOX", 1, "Archive", ARCHIVE)]));
+    assert_eq!((result.errors.len(), changes(&imap)), (0, vec!["UID MOVE 1 \"Archive\"".to_string()]));
+}
+
 #[test]
 fn what_is_gone_from_the_server_leaves_nothing_to_do() {
     let imap = two_way(true, true);
@@ -1588,9 +1736,13 @@ fn a_mailbox_arrives_in_pieces_the_inbox_first() {
     let all = pieces(&asked, batches_of(50));
     // Every piece but the last says that more is to come, and how far the run has got.
     let (last, before) = all.split_last().unwrap();
-    assert!(!last.partial && last.progress.is_empty() && !last.stopped);
+    assert!(!last.partial && last.progress.is_empty() && !last.stopped && last.step.is_none());
     assert!(before.iter().all(|piece| piece.partial && !piece.stopped));
     assert!(all.iter().all(|piece| piece.errors.is_empty() && piece.account == 7 && piece.email == "ada@example.org"));
+    // The line is made of the numbers that come with it (#120).
+    assert!(before.iter().all(|piece| piece.step.as_ref().is_some_and(|step| step.line() == piece.progress)));
+    let reading = before.iter().filter_map(|piece| piece.step.as_ref()).find(|step| step.stage == SyncStage::Reading).unwrap();
+    assert_eq!((reading.folder.as_str(), reading.done, reading.total, reading.stage.phase()), ("Inbox", 50, 230, SyncPhase::NewMail));
     assert_eq!(
         before.iter().map(|piece| piece.progress.as_str()).collect::<Vec<_>>(),
         [

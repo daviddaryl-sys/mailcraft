@@ -1,6 +1,6 @@
 //! The owner's text in a message being written, drawn as it will be sent: bold, italic,
 //! underline, a font size, links, bulleted and numbered lists, and a signature's pictures
-//! (`mailcraft_model::rich`). The same editor edits a signature in File › Options › Signatures
+//! (`mailcraft_model::rich`). The same editor edits a signature in File › Signatures
 //! ([`Which`]); while one is open there, the message's body is only drawn.
 //!
 //! The widget only draws and listens. Every change, the caret and the selection included, is a
@@ -48,7 +48,7 @@ const MAX_PREEDIT: usize = 256;
 pub enum Which {
     /// The message being written.
     Message,
-    /// The signature open in File › Options › Signatures.
+    /// The signature open in File › Signatures.
     Signature,
 }
 

@@ -155,6 +155,11 @@ pub struct Tokens {
     pub selection: Color32,
     /// Search hits.
     pub find_highlight: Color32,
+    /// A flagged message's row in the message list: a faint tint, unlike a selected row or one
+    /// under the pointer.
+    pub flagged_row: Color32,
+    /// The text of a flagged message whose follow-up is past its due date.
+    pub overdue: Color32,
     /// Calendar: hours outside the working day, and days outside the month in view.
     pub off_hours: Color32,
     /// Calendar: today's column or cell.
@@ -200,6 +205,8 @@ impl Tokens {
             status_bar: window,
             selection: Color32::from_rgb(0xDE, 0xDE, 0xDE),
             find_highlight: Color32::from_rgba_unmultiplied(0xFF, 0xE0, 0x3D, 0x90),
+            flagged_row: Color32::from_rgb(0xFC, 0xF0, 0xF1),
+            overdue: Color32::from_rgb(0xB4, 0x23, 0x18),
             off_hours: Color32::from_rgb(0xF5, 0xF5, 0xF5),
             today: Color32::from_rgb(0xEB, 0xF3, 0xFC),
             menu: Color32::WHITE,
@@ -242,6 +249,8 @@ impl Tokens {
             status_bar: window,
             selection: Color32::from_rgb(0x44, 0x44, 0x44),
             find_highlight: Color32::from_rgba_unmultiplied(0xC8, 0xA8, 0x00, 0x70),
+            flagged_row: Color32::from_rgb(0x3A, 0x2B, 0x2E),
+            overdue: Color32::from_rgb(0xFF, 0x99, 0x99),
             off_hours: Color32::from_rgb(0x1F, 0x1F, 0x1F),
             today: Color32::from_rgb(0x1F, 0x32, 0x46),
             menu: Color32::from_rgb(0x29, 0x29, 0x29),
@@ -411,6 +420,9 @@ pub fn font_definitions_with(system: &SystemFont) -> FontDefinitions {
     // Symbols and emoji fall back to egui's defaults (kept after our faces).
     let mut fallback: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     fallback.push("SourceSans".into());
+    // Last, JetBrains Mono, for what only it has: U+FFFD among them, the mark of a character that
+    // couldn't be read, which would otherwise be an empty box (#180).
+    fallback.push("Mono".into());
     // A weight is the system's face of that weight, then the bundled face nearest to it, then
     // the regular faces for whatever glyph those two lack.
     let chain = |faces: &[Option<&str>]| -> Vec<String> {
@@ -673,6 +685,25 @@ mod tests {
         ctx
     }
 
+    /// #180: U+FFFD, the mark of a character that couldn't be read, has a glyph in every weight
+    /// of the interface's text, from JetBrains Mono at the end of each family.
+    #[test]
+    fn the_replacement_character_is_drawn() {
+        let fonts = super::font_definitions_with(&SystemFont::none());
+        for (name, faces) in &fonts.families {
+            if *name != egui::FontFamily::Monospace {
+                assert_eq!(faces.last().map(String::as_str), Some("Mono"), "{name:?}");
+            }
+        }
+        let ctx = draws(fonts);
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            for font in [super::regular(12.0), super::medium(12.0), super::semibold(12.0), super::bold(12.0)] {
+                assert!(ui.fonts_mut(|f| f.has_glyph(&font, '\u{fffd}')), "{font:?}");
+            }
+        })
+        .drop_without_applying_deltas();
+    }
+
     /// Without the system's font (another system, the browser, a folder that isn't there) the
     /// bundled Inter draws everything, in every weight.
     #[test]
@@ -818,6 +849,7 @@ mod tests {
                 ("checked", t.checked),
                 ("off_hours", t.off_hours),
                 ("today", t.today),
+                ("flagged_row", t.flagged_row),
             ];
             for (name, bg) in backgrounds {
                 for (ink, color) in [("text", t.text), ("text_dim", t.text_dim), ("accent_text", t.accent_text), ("icon", t.icon)] {
@@ -832,6 +864,13 @@ mod tests {
             assert!(contrast(t.text, t.pressed) >= 4.5, "{theme}: text on pressed");
             assert!(contrast(t.group_label, t.ribbon) >= 4.5, "{theme}: group labels");
             assert!(contrast(t.red, t.surface) >= 4.5, "{theme}: red");
+            for bg in [t.flagged_row, t.surface, t.hover, t.selection] {
+                assert!(contrast(t.overdue, bg) >= 4.5, "{theme}: overdue on {bg:?} is {:.2}", contrast(t.overdue, bg));
+            }
+            // A flagged row is told apart from the list, a selected row and one under the pointer.
+            for other in [t.surface, t.selection, t.hover, t.checked, t.today] {
+                assert_ne!(t.flagged_row, other, "{theme}: flagged row");
+            }
             // A selected row and one under the pointer are told apart from each other and from the pane.
             for (a, b) in [(t.selection, t.panel), (t.selection, t.surface), (t.selection, t.hover), (t.hover, t.panel), (t.hover, t.ribbon)] {
                 assert_ne!(a, b, "{theme}");

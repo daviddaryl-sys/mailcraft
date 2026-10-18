@@ -66,7 +66,11 @@ struct Rig {
 
 impl Rig {
     fn new(can_move: bool, uidplus: bool) -> Rig {
-        let imap = Fake::imap(world(can_move, uidplus));
+        Rig::with(world(can_move, uidplus))
+    }
+
+    fn with(world: ImapWorld) -> Rig {
+        let imap = Fake::imap(world);
         let smtp = Fake::smtp(SmtpWorld { user: "ada@example.org".into(), password: PASSWORD.into(), auth: true, ..Default::default() });
         let mut s = Session::at(Mailbox::with_local_account("", ""), 1_800_000_000, 0);
         let servers = json!({
@@ -482,4 +486,105 @@ fn a_run_called_off_at_any_point_is_finished_by_the_next() {
         assert!(totals.stopped && totals.new > 0 && totals.new < 60, "{totals:?}");
         assert!(r.s.sync_status.starts_with(&format!("Stopped ({} new messages, 1 sent) — ", totals.new)), "{}", r.s.sync_status);
     }
+}
+
+// ---- Gmail ----
+
+/// A Gmail account, as Google describes it for IMAP: labels as mailboxes, and every message that
+/// is not in the trash also in all mail.
+fn gmail() -> ImapWorld {
+    let inbox = vec![message(1, "\\Seen", "One"), message(2, "", "Two"), message(3, "", "Three"), message(4, "", "Four")];
+    let mut all = inbox.clone();
+    all.push(message(5, "\\Seen", "Archived before"));
+    ImapWorld {
+        user: "ada@example.org".into(),
+        password: PASSWORD.into(),
+        can_move: true,
+        uidplus: true,
+        gmail: true,
+        mailboxes: vec![
+            mailbox("INBOX", "\\HasNoChildren", 11, inbox),
+            mailbox("[Gmail]", "\\Noselect \\HasChildren", 0, Vec::new()),
+            mailbox("[Gmail]/All Mail", "\\HasNoChildren \\All", 51, all),
+            mailbox("[Gmail]/Sent Mail", "\\HasNoChildren \\Sent", 21, Vec::new()),
+            mailbox("[Gmail]/Trash", "\\HasNoChildren \\Trash", 61, Vec::new()),
+        ],
+        ..Default::default()
+    }
+}
+
+/// At Gmail, Archive takes the Inbox label away and makes no label of its own; Delete for good
+/// takes the message out of all mail too, by way of the trash. The runs after either find
+/// everything where it was left: nothing comes down again, and nothing is lost.
+#[test]
+fn gmail_archives_into_all_mail_and_deletes_for_good_through_the_trash() {
+    let mut r = Rig::with(gmail());
+    let (inbox, archive, deleted) = (r.folder(FolderKind::Inbox), r.folder(FolderKind::Archive), r.folder(FolderKind::Deleted));
+    // All mail is not downloaded: only the Inbox's four come.
+    assert_eq!(r.sync()["new"], 4);
+    assert_eq!((r.s.mailbox.count(inbox), r.s.mailbox.count(archive)), (4, 0));
+    let (one, two, three, four) = (r.titled("One"), r.titled("Two"), r.titled("Three"), r.titled("Four"));
+    let all_mail = |r: &Rig| r.server("[Gmail]/All Mail").iter().map(|(uid, _)| *uid).collect::<Vec<_>>();
+    let inbox_uids = |r: &Rig| r.server("INBOX").iter().map(|(uid, _)| *uid).collect::<Vec<_>>();
+
+    // Archive: out of the Inbox there, still in all mail, and no "Archive" label.
+    r.run("mail.archive", json!({"ids": [one, two]}));
+    let total = r.total();
+    for round in 0..3 {
+        let applied = r.sync();
+        assert_eq!((applied["new"].as_u64(), applied["removed"].as_u64()), (Some(0), Some(0)), "round {round}");
+        assert_eq!((r.total(), r.s.mailbox.count(archive), r.s.mailbox.count(inbox), r.waiting()), (total, 2, 2, 0), "round {round}");
+        assert!(r.s.mailbox.pending.is_empty(), "round {round}");
+    }
+    assert_eq!(inbox_uids(&r), [3, 4]);
+    assert_eq!(all_mail(&r), [1, 2, 3, 4, 5]);
+    let world = r.imap.world();
+    assert!(world.mailboxes.iter().all(|m| !m.raw.eq_ignore_ascii_case("Archive")) && world.subscribed.is_empty());
+    assert_eq!((world.sent("CREATE"), world.sent("SUBSCRIBE")), (0, 0));
+    // All mail was put into, never read whole.
+    assert!(!world.log.iter().any(|line| line.contains("EXAMINE") && line.contains("All Mail")));
+    drop(world);
+    // The Archive folder follows all mail, and the archived messages have their UIDs there.
+    let folder = r.s.mailbox.folder(archive).unwrap();
+    assert_eq!((folder.remote.as_str(), folder.uid_validity), ("[Gmail]/All Mail", 51));
+    let uid = |r: &Rig, id| r.s.mailbox.message(id).map(|m| (m.folder, m.uid)).unwrap();
+    assert_eq!((uid(&r, one), uid(&r, two)), ((archive, 1), (archive, 2)));
+    let downloads = |r: &Rig| r.imap.world().log.iter().filter(|line| line.contains("BODY.PEEK[]")).count();
+    assert_eq!(downloads(&r), 4);
+
+    // Back to the Inbox: the label comes back, and the message is here once.
+    r.run("mail.move", json!({"id": two, "folder": inbox}));
+    for _ in 0..2 {
+        r.sync();
+        assert_eq!((r.total(), r.s.mailbox.count(archive), r.s.mailbox.count(inbox), r.waiting()), (total, 1, 3, 0));
+    }
+    assert_eq!((inbox_uids(&r), all_mail(&r)), (vec![3, 4, 5], vec![1, 2, 3, 4, 5]));
+    assert_eq!(downloads(&r), 4);
+
+    // Delete for good, in the Inbox and in Archive: gone from all mail and from the trash.
+    r.run("mail.deletePermanently", json!({"ids": [three, one]}));
+    for _ in 0..2 {
+        r.sync();
+        assert_eq!((r.total(), r.s.mailbox.count(archive), r.s.mailbox.count(inbox), r.waiting()), (total - 2, 0, 2, 0));
+    }
+    assert_eq!((inbox_uids(&r), all_mail(&r)), (vec![4, 5], vec![2, 4, 5]));
+    assert!(r.server("[Gmail]/Trash").is_empty());
+    assert_eq!(r.s.mailbox.count(deleted), 0);
+
+    // Delete: to the trash, and out of all mail; then for good from there.
+    r.run("mail.delete", json!({"id": four}));
+    for _ in 0..2 {
+        r.sync();
+        assert_eq!((r.s.mailbox.count(deleted), r.s.mailbox.count(inbox), r.total(), r.waiting()), (1, 1, total - 2, 0));
+    }
+    assert_eq!((inbox_uids(&r), all_mail(&r), r.server("[Gmail]/Trash").len()), (vec![5], vec![2, 5], 1));
+    r.run("mail.delete", json!({"id": four}));
+    for _ in 0..2 {
+        r.sync();
+        assert_eq!((r.s.mailbox.count(deleted), r.total(), r.waiting()), (0, total - 3, 0));
+    }
+    assert!(r.server("[Gmail]/Trash").is_empty());
+    assert_eq!(downloads(&r), 4);
+    // Never a sweep of what other programs marked.
+    assert!(!r.imap.world().log.iter().any(|line| line.ends_with(" EXPUNGE") || line.ends_with(" CLOSE")));
 }

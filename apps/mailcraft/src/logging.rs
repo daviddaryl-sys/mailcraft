@@ -265,8 +265,10 @@ impl log::Log for AppLogger {
         }
         // Formatted before the sink is locked, so a message that logs while it is formatted can't deadlock.
         let thread = std::thread::current();
-        let line =
-            format_line(&timestamp(SystemTime::now()), record.level(), thread.name().unwrap_or("?"), record.target(), &record.args().to_string());
+        // Whatever a line was given (a server's error text, a message's), no address, link,
+        // token or quoted text reaches standard error or the file.
+        let message = crate::diagnostics::scrub(&record.args().to_string());
+        let line = format_line(&timestamp(SystemTime::now()), record.level(), thread.name().unwrap_or("?"), record.target(), &message);
         if self.stderr {
             // No terminal (a Windows GUI build, a closed pipe) is not an error worth reporting.
             let _ = std::io::stderr().write_all(line.as_bytes());
@@ -568,6 +570,32 @@ mod tests {
         // Attaching again rotates: the first log becomes `.1`.
         logger.attach_dir(&dir).expect("attach again");
         assert_eq!(read(&dir.join("mailcraft.1.log")), text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_address_link_token_or_quoted_text_reaches_the_file() {
+        use log::Log;
+        let dir = temp_dir("scrub");
+        let logger = AppLogger::new(Filter::parse("info"), false);
+        let path = logger.attach_dir(&dir).expect("attach");
+        // What a server's error text, a calendar check or a sign-in can bring with it.
+        for message in [
+            "send/receive, account 3: the server said: 550 5.1.1 <bob@example.org>: Recipient address rejected",
+            "calendar check, account 2: 1. Make a test appointment: FAILED (the server answered 404). ErrorItemNotFound: The mailbox 'Avery Quinn' has no calendar",
+            "favorites: they couldn't be read: the server said \"Grace's folder Quarterly figures\"",
+            "sign-in: redirect to https://login.example.net/cb?code=M.C507_BAY.2.U.abc123 refused, token eyJ0eXAi.tok-en_123.c2ln",
+        ] {
+            logger.log(&log::Record::builder().level(log::Level::Warn).target("mailcraft_ui_egui").args(format_args!("{message}")).build());
+        }
+        let text = read(&path);
+        for private in ["bob@", "example.org", "Avery", "Grace", "Quarterly", "login.example.net", "code=", "abc123", "eyJ0eXAi"] {
+            assert!(!text.contains(private), "{private} reached the log:\n{text}");
+        }
+        // What finding a fault needs stays.
+        for kept in ["account 3", "550 5.1.1", "<address>", "404", "ErrorItemNotFound", "<link>", "<id>", "couldn't be read"] {
+            assert!(text.contains(kept), "{kept} is missing:\n{text}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

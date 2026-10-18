@@ -223,8 +223,21 @@ fn everything_lays_out_without_panicking() {
         ("file: options", vec![("ui.backstage", json!({"value": true, "page": "options"}))]),
         ("file: about", vec![("ui.backstage", json!({"value": true, "page": "about"}))]),
     ];
-    let dialogs =
-        ["commands", "folder", "goToDate", "about", "discardDraft", "event", "meeting", "contact", "task", "account", "categories", "rules"];
+    let dialogs = [
+        "commands",
+        "folder",
+        "goToDate",
+        "about",
+        "contributors",
+        "discardDraft",
+        "event",
+        "meeting",
+        "contact",
+        "task",
+        "account",
+        "categories",
+        "rules",
+    ];
     for theme in ["light", "dark"] {
         for size in [(1280.0, 800.0), (320.0, 200.0)] {
             for (what, steps) in &setups {
@@ -393,6 +406,8 @@ fn send_receive_signs_in_first_for_an_account_without_a_password() {
     let synced: Arc<Mutex<Vec<(String, String)>>> = Default::default();
     let asked: Arc<Mutex<Vec<(String, String)>>> = Default::default();
     let refuse = Arc::new(AtomicBool::new(false));
+    // An error the next Send/Receive ends with, once.
+    let error: Arc<Mutex<Option<String>>> = Default::default();
     // What the next sign-in answers; `None` leaves the owner in the browser.
     let answer: Arc<Mutex<Option<Answer>>> = Default::default();
     let waiting: Arc<Mutex<Vec<(mpsc::Sender<Answer>, Arc<AtomicBool>)>>> = Default::default();
@@ -400,10 +415,11 @@ fn send_receive_signs_in_first_for_an_account_without_a_password() {
         |access: &str| Ok(Tokens { access: access.into(), refresh: "ref-1".into(), expires_at: mailcraft_time::now() + 3600, ..Default::default() });
 
     let mut a = app();
-    let (synced2, refuse2) = (synced.clone(), refuse.clone());
+    let (synced2, refuse2, error2) = (synced.clone(), refuse.clone(), error.clone());
     a.services.sync = Some(Box::new(move |req: SyncRequest| {
         synced2.lock().unwrap().push((req.access_token.clone(), req.password.clone()));
-        let errors = if refuse2.load(Ordering::Relaxed) { vec!["The server refused the sign-in".to_string()] } else { Vec::new() };
+        let mut errors = if refuse2.load(Ordering::Relaxed) { vec!["The server refused the sign-in".to_string()] } else { Vec::new() };
+        errors.extend(error2.lock().unwrap().take());
         let (tx, rx) = mpsc::channel();
         tx.send(SyncResult { account: req.account.id, errors, ..Default::default() }).unwrap();
         rx
@@ -451,6 +467,24 @@ fn send_receive_signs_in_first_for_an_account_without_a_password() {
     a.poll_sync();
     assert_eq!(asked.lock().unwrap().last().unwrap().1, "ref-1");
     assert_eq!(synced.lock().unwrap().last().unwrap().0, "tok-2");
+
+    // A token that runs out before a run could be over is renewed first, not taken along.
+    a.tokens.get_mut(&id).unwrap().expires_at = mailcraft_time::now() + 300;
+    *answer.lock().unwrap() = Some(good("tok-3"));
+    assert_eq!(a.execute("ui.sync", json!({"account": id})).unwrap()["pending"], "signIn");
+    a.poll_sign_in();
+    a.poll_sync();
+    assert_eq!(synced.lock().unwrap().last().unwrap().0, "tok-3");
+
+    // Microsoft ends the session when the token runs out during the run: the next run renews it.
+    *error.lock().unwrap() = Some("Couldn't open \"Inbox\": the server ended the session: Session invalidated - AccessTokenExpired".into());
+    a.execute("ui.sync", json!({"account": id})).unwrap();
+    a.poll_sync();
+    *answer.lock().unwrap() = Some(good("tok-4"));
+    assert_eq!(a.execute("ui.sync", json!({"account": id})).unwrap()["pending"], "signIn");
+    a.poll_sign_in();
+    a.poll_sync();
+    assert_eq!(synced.lock().unwrap().last().unwrap().0, "tok-4");
 
     // A sign-in that fails says so. What was kept to renew with stays (the trouble may have been
     // the network); the host decides when the provider has refused it for good.
@@ -614,6 +648,104 @@ fn the_system_remembers_passwords_and_sign_ins_only_when_wanted() {
         assert!(b.execute("ui.davSync", json!({"account": moved})).is_err());
         b.dialog = None;
     }
+}
+
+/// (#103) An account that exists is signed in again, and on the provider's page the owner picks
+/// somebody else: those tokens are neither used nor remembered, mail's or Graph's, however they
+/// come in, and the owner is told who to sign in as. The account's own address in any case, its
+/// user name, and a sign-in that names nobody are the account's, as before.
+#[test]
+fn a_sign_in_as_somebody_else_is_never_taken_for_an_account_that_exists() {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, mpsc};
+
+    use mailcraft_model::sync::{SyncRequest, SyncResult, Tokens};
+
+    #[derive(Clone, Default)]
+    struct Store(Arc<Mutex<HashMap<String, String>>>);
+    impl crate::SecretStore for Store {
+        fn get(&self, key: &str) -> Option<String> {
+            self.0.lock().unwrap().get(key).cloned()
+        }
+        fn set(&self, key: &str, secret: &str) -> Result<(), String> {
+            self.0.lock().unwrap().insert(key.to_string(), secret.to_string());
+            Ok(())
+        }
+        fn delete(&self, key: &str) {
+            self.0.lock().unwrap().remove(key);
+        }
+    }
+    let store = Store::default();
+    let who: Arc<Mutex<String>> = Arc::new(Mutex::new("admin@mail.example".into()));
+    let synced: Arc<Mutex<Vec<String>>> = Default::default();
+    let mut a = MailApp::new(Session::at(mailcraft_engine::sample::mailbox(NOW, 0), NOW, 0), Services::default());
+    (a.autosave, a.auto_sync) = (false, false);
+    let log = synced.clone();
+    a.services.sync = Some(Box::new(move |req: SyncRequest| {
+        log.lock().unwrap().push(req.access_token.clone());
+        let (tx, rx) = mpsc::channel();
+        tx.send(SyncResult { account: req.account.id, ..Default::default() }).unwrap();
+        rx
+    }));
+    let signs = who.clone();
+    a.services.sign_in = Some(Box::new(move |_req: crate::SignInRequest| {
+        let (tx, rx) = mpsc::channel();
+        let email = signs.lock().unwrap().clone();
+        let tokens =
+            Tokens { access: "tok-other".into(), refresh: "ref-other".into(), expires_at: mailcraft_time::now() + 3600, email, ..Default::default() };
+        tx.send(Ok(tokens)).unwrap();
+        rx
+    }));
+    a.services.secrets = Some(Box::new(store.clone()));
+    let id = a.execute(
+        "account.add",
+        json!({"email": "quinn@mail.example", "auth": "oauth2", "provider": "microsoft", "incoming": {"host": "outlook.office365.com"}}),
+    );
+    let id = id.unwrap()["id"].as_u64().unwrap();
+    let said = "You signed in as admin@mail.example, but this account is quinn@mail.example. Sign in again as quinn@mail.example.";
+    let nothing_kept = |a: &MailApp| !a.tokens.contains_key(&id) && !a.graph_tokens.contains_key(&id) && store.0.lock().unwrap().is_empty();
+
+    // Send/Receive signs in for mail: refused, said, and no run with the other one's token.
+    a.execute("ui.sync", json!({"account": id})).unwrap();
+    a.poll_sign_in();
+    assert!(nothing_kept(&a) && synced.lock().unwrap().is_empty() && !a.syncing());
+    assert_eq!(a.status_msg.as_ref().map(|(m, _)| m.as_str()), Some(said));
+    // "Connect calendar and contacts" signs in for Graph: the same.
+    a.status_msg = None;
+    a.execute("ui.connectMicrosoft", json!({"account": id})).unwrap();
+    a.poll_sign_in();
+    assert!(nothing_kept(&a));
+    assert_eq!(a.status_msg.as_ref().map(|(m, _)| m.as_str()), Some(said));
+    // Tokens a background job renewed for it are looked at the same way.
+    a.keep_graph_tokens(
+        id,
+        Tokens { access: "tok-other".into(), refresh: "ref-other".into(), email: "admin@mail.example".into(), ..Default::default() },
+    );
+    assert!(nothing_kept(&a));
+
+    // The account's own address, whatever its case: used and remembered as before.
+    *who.lock().unwrap() = "Quinn@Mail.Example".into();
+    a.execute("ui.sync", json!({"account": id})).unwrap();
+    a.poll_sign_in();
+    assert_eq!(a.tokens.get(&id).map(|t| t.access.as_str()), Some("tok-other"));
+    assert_eq!(store.0.lock().unwrap().get("refresh:quinn@mail.example").map(String::as_str), Some("ref-other"));
+    assert_eq!(synced.lock().unwrap().as_slice(), ["tok-other"]);
+    a.poll_sync();
+    // A sign-in that names nobody: the account's, as it always was.
+    a.tokens.clear();
+    store.0.lock().unwrap().clear();
+    who.lock().unwrap().clear();
+    a.execute("ui.sync", json!({"account": id})).unwrap();
+    a.poll_sign_in();
+    assert!(a.tokens.contains_key(&id));
+    a.poll_sync();
+    // An address that is another name for the one that signs in: its user name is who signs in.
+    a.tokens.clear();
+    a.execute("account.edit", json!({"id": id, "username": "q.admin@mail.example"})).unwrap();
+    *who.lock().unwrap() = "Q.Admin@mail.example".into();
+    a.execute("ui.sync", json!({"account": id})).unwrap();
+    a.poll_sign_in();
+    assert!(a.tokens.contains_key(&id));
 }
 
 /// A system whose credential store can't be used (on Linux, no Secret Service running, or one
@@ -945,6 +1077,109 @@ fn a_message_dragged_onto_a_folder_is_filed_there() {
     }
 }
 
+/// A mailbox with a Microsoft account and a shared mailbox under it, each with mail in its Inbox,
+/// and the shared mailbox's Inbox in view; the owner's Inbox and the shared mailbox's.
+fn shared_and_own() -> (MailApp, mailcraft_model::Id, mailcraft_model::Id) {
+    use mailcraft_engine::cmd::graph_mail::apply_graph_mail;
+    use mailcraft_model::FolderKind;
+    use mailcraft_model::sync::{FolderListing, GraphFolder, GraphMailResult, GraphMessage, MessagePage, ServerMessage};
+
+    let mut s = Session::empty();
+    s.shared_mailboxes = true;
+    let owner = s.run("account.add", &json!({"email": "owner@example.org", "kind": "microsoft"})).unwrap()["id"].as_u64().unwrap();
+    let shared = s.run("account.addSharedMailbox", &json!({"address": "support@example.org"})).unwrap()["id"].as_u64().unwrap();
+    for (account, email) in [(owner, "owner@example.org"), (shared, "support@example.org")] {
+        let folder = |id: &str, name: &str, kind| GraphFolder { id: id.into(), name: name.into(), kind, ..Default::default() };
+        let folders = vec![folder("in", "Inbox", FolderKind::Inbox), folder("de", "Deleted Items", FolderKind::Deleted)];
+        let listing = FolderListing { folders, complete: true };
+        apply_graph_mail(&mut s, GraphMailResult { account, email: email.into(), listing: Some(listing), ..Default::default() }).unwrap();
+        let messages = ["AAkA1", "AAkA2"]
+            .iter()
+            .map(|id| GraphMessage {
+                server: ServerMessage { id: (*id).into(), folder: "in".into(), ..Default::default() },
+                subject: format!("{email}: {id}"),
+                ..Default::default()
+            })
+            .collect();
+        let page = MessagePage { folder: "in".into(), messages, caught_up: true, ..Default::default() };
+        apply_graph_mail(&mut s, GraphMailResult { account, email: email.into(), pages: vec![page], whole: true, ..Default::default() }).unwrap();
+    }
+    let (mine, theirs) = (s.mailbox.folder_of_kind(owner, FolderKind::Inbox).unwrap(), s.mailbox.folder_of_kind(shared, FolderKind::Inbox).unwrap());
+    let mut app = MailApp::new(s, Services::default());
+    app.autosave = false;
+    app.auto_sync = false;
+    app.execute("folder.select", json!({"id": theirs})).unwrap();
+    (app, mine, theirs)
+}
+
+/// #152: a message dragged from a shared mailbox to the owner's own is refused at once, and the
+/// reason comes in a message box with OK (and stays in the status bar). The same move through
+/// the control channel, as an agent or a script asks it, opens nothing: it answers the error.
+#[test]
+fn a_refused_drag_says_why_in_a_message_box_and_the_control_channel_never_does() {
+    let (a, mine, theirs) = shared_and_own();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut harness = window(a.with_control(rx));
+    let row = harness.state_mut().session.rows().first().cloned().unwrap();
+    assert_eq!(harness.state().session.mailbox.message(row.id).map(|m| m.folder), Some(theirs));
+    let start = harness.state().hit.rect("message", row.id).unwrap().center();
+    let target = harness.state().hit.rect("folder", mine).expect("the owner's Inbox in the folder pane").center();
+    harness.event(egui::Event::PointerMoved(start));
+    harness.step();
+    let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+    harness.event(button(start, true));
+    harness.step();
+    for k in 1..=8 {
+        harness.event(egui::Event::PointerMoved(start + (target - start) * (k as f32 / 8.0)));
+        harness.step();
+    }
+    harness.event(button(target, false));
+    harness.run_steps(3);
+    assert_eq!(harness.state().session.mailbox.message(row.id).map(|m| m.folder), Some(theirs), "nothing moved");
+    let Some(crate::dialogs::Dialog::Refused { text }) = &harness.state().dialog else {
+        panic!("a message box: {:?}", harness.state().dialog.as_ref().map(|d| d.name()))
+    };
+    assert!(text.contains("only within one mailbox"), "{text}");
+    assert!(harness.state().status_msg.as_ref().is_some_and(|(said, _)| said.contains("only within one mailbox")));
+    // OK closes it.
+    let ok = harness.state().hit.rect("refusedOk", 0).expect("OK");
+    harness.event(egui::Event::PointerMoved(ok.center()));
+    harness.step();
+    for pressed in [true, false] {
+        harness.event(button(ok.center(), pressed));
+        harness.step();
+    }
+    harness.run_steps(2);
+    assert!(harness.state().dialog.is_none());
+
+    // Through the control channel: the error, and no box.
+    harness.state_mut().status_msg = None;
+    let (req, reply) = crate::ControlRequest::new("engine.execute", json!({"command": "mail.move", "params": {"ids": [row.id], "folder": mine}}));
+    tx.send(req).unwrap();
+    harness.run_steps(3);
+    let reply = reply.try_recv().unwrap();
+    assert_eq!(reply["ok"], false);
+    assert!(reply["error"].as_str().is_some_and(|e| e.contains("only within one mailbox")), "{reply}");
+    assert!(harness.state().dialog.is_none() && harness.state().refused.is_none());
+    // Nor does a command the window runs by itself, outside of anything the owner did.
+    let _ = harness.state_mut().run("mail.move", json!({"ids": [row.id], "folder": mine}));
+    harness.run_steps(2);
+    assert!(harness.state().dialog.is_none());
+}
+
+/// What isn't a refusal stays in the status bar: a command that wasn't available, had nothing to
+/// do or was given what it can't take, and the window's own commands.
+#[test]
+fn only_a_real_refusal_is_worth_a_message_box() {
+    use crate::refusal_worth_a_box as boxed;
+    assert!(boxed("mail.move", mailcraft_model::BETWEEN_MAILBOXES));
+    assert!(!boxed("mail.delete", "not available: nothing is selected"));
+    assert!(!boxed("compose.undo", "nothing to undo in the message"));
+    assert!(!boxed("mail.move", "bad parameters: `folder` is a folder id"));
+    assert!(!boxed("ui.openWindow", "no windows of their own here"));
+    assert!(!boxed("mail.move", "  "));
+}
+
 /// Reminders fire: an event inside its reminder time shows in the reminders window, stays until
 /// it is dismissed (which is remembered) or put off (which is not), and the window comes up on
 /// its own.
@@ -1115,6 +1350,41 @@ fn what_cant_be_taken_back_is_asked_about_first() {
     assert_eq!(a.session.mailbox.count(bin), kept);
 }
 
+/// #186: a contact has no Deleted Items to go to, so deleting one by hand is asked about first,
+/// naming it; a script is not asked.
+#[test]
+fn deleting_a_contact_is_asked_about_first() {
+    let mut a = app();
+    let id = a.execute("people.new", json!({"first": "Ivana", "last": "Horvat", "email": "ivana@example.org"})).unwrap()["id"].as_u64().unwrap();
+    let total = a.session.mailbox.contacts.len();
+    assert_eq!(a.run("people.delete", json!({"id": id})).unwrap()["pending"], "confirm");
+    let Some(crate::dialogs::Dialog::Confirm { ask, command, .. }) = &a.dialog else { panic!("no question") };
+    assert_eq!((command.as_str(), ask.title.as_str(), ask.action.as_str()), ("people.delete", "Delete Contact", "Delete"));
+    assert_eq!(ask.text, "\"Ivana Horvat\" will be deleted for good. Contacts don't go to Deleted Items.");
+    // Cancelled: still there. Confirmed: gone, and Undo brings it back.
+    a.dialog = None;
+    assert_eq!(a.session.mailbox.contacts.len(), total);
+    a.run("people.delete", json!({"id": id, "confirmed": true})).unwrap();
+    assert!(a.session.mailbox.contact(id).is_none() && a.dialog.is_none());
+    a.execute("edit.undo", json!({})).unwrap();
+    assert!(a.session.mailbox.contact(id).is_some());
+    // The selected one, from the ribbon or the Delete key, is asked about the same way.
+    a.execute("people.select", json!({"id": id})).unwrap();
+    assert_eq!(a.run("people.delete", json!({})).unwrap()["pending"], "confirm");
+    a.dialog = None;
+    // A script is not asked.
+    a.execute("people.delete", json!({"id": id})).unwrap();
+    assert!(a.session.mailbox.contact(id).is_none());
+    // A contact known by its address alone is named by it; the question lays out, and leaves
+    // the contact where it is.
+    let only = a.execute("people.new", json!({"email": "kim@example.org"})).unwrap()["id"].as_u64().unwrap();
+    a.run("people.delete", json!({"id": only})).unwrap();
+    let Some(crate::dialogs::Dialog::Confirm { ask, .. }) = &a.dialog else { panic!("no question") };
+    assert!(ask.text.starts_with("\"kim@example.org\" will be deleted for good."), "{}", ask.text);
+    let a = frames(a, (1280.0, 800.0), 3);
+    assert!(a.session.mailbox.contact(only).is_some());
+}
+
 /// Typing a recipient offers the people it could be; Enter takes the one that is marked, the
 /// arrows mark another, and typing carries on after it.
 #[test]
@@ -1205,8 +1475,6 @@ fn send_receive_problems_can_be_read_afterwards() {
     let id =
         a.execute("account.add", json!({"email": "avery@mail.example", "incoming": {"host": "imap.mail.example"}})).unwrap()["id"].as_u64().unwrap();
     assert!(!a.has_sync_problems());
-    assert!(a.execute("ui.dialog", json!({"name": "syncProblems"})).is_err() || a.dialog.is_none(), "nothing to show yet");
-    a.dialog = None;
 
     a.execute("ui.sync", json!({"account": id, "password": "pw"})).unwrap();
     a.poll_sync();
@@ -1215,9 +1483,11 @@ fn send_receive_problems_can_be_read_afterwards() {
     assert!(lines[0].starts_with("avery@mail.example"), "{lines:?}");
     assert!(lines.iter().any(|l| l.contains("SmtpClientAuthentication is disabled")));
     assert!(lines.iter().all(|l| l.chars().count() < 700), "a server's megabyte of text is cut");
-    // The whole of it in a window, which lays out.
-    a.execute("ui.dialog", json!({"name": "syncProblems"})).unwrap();
-    assert!(matches!(&a.dialog, Some(crate::dialogs::Dialog::Report { lines, .. }) if lines.len() == 3));
+    // The whole of it under the account's row in Send/Receive Progress, which lays out.
+    assert_eq!(a.execute("ui.dialog", json!({"name": "syncProblems"})).unwrap(), json!({"panel": "syncProgress"}));
+    assert!(a.dialog.is_none() && a.sync_panel.as_ref().is_some_and(|p| p.to_problem));
+    let rows = crate::sync_panel::rows(&a);
+    assert_eq!((rows.len(), rows[0].problems.len(), rows[0].line()), (1, 2, "2 problems".to_string()));
     let mut a = frames(a, (1280.0, 800.0), 3);
 
     // A run that goes through clears them.
@@ -1241,9 +1511,10 @@ fn microsoft_graph_sends_and_brings_the_calendar_before_the_mail() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
 
+    use mailcraft_engine::cmd::sync_progress::RunState;
     use mailcraft_model::FolderKind;
     use mailcraft_model::remote::{ContactsDownload, EventsDownload, RemoteContact, RemoteEvent};
-    use mailcraft_model::sync::{SyncRequest, SyncResult, Tokens};
+    use mailcraft_model::sync::{SyncPhase, SyncRequest, SyncResult, Tokens};
 
     // What Graph was asked (outbox, directory, had a token) and what the mail server was asked to send.
     let asked: Arc<Mutex<Vec<(usize, bool, bool)>>> = Default::default();
@@ -1319,9 +1590,16 @@ fn microsoft_graph_sends_and_brings_the_calendar_before_the_mail() {
     assert_eq!(a.execute("compose.send", json!({})).unwrap()["queued"], true);
     assert_eq!(a.execute("ui.sync", json!({"account": id})).unwrap()["pending"], "graph");
     assert!(!a.enabled("ui.sync"), "one run at a time");
+    // Send/Receive Progress: sending first, through Microsoft.
+    let row = |a: &MailApp| a.session.sync_progress.accounts.iter().find(|r| r.account == id).cloned().unwrap();
+    assert_eq!((row(&a).state, row(&a).phase), (RunState::Running, Some(SyncPhase::Sending)));
     settle(&mut a);
     assert_eq!(*asked.lock().unwrap(), [(1, true, false)]);
     assert_eq!(*smtp.lock().unwrap(), [0], "what Graph sent is not sent again by the mail server");
+    // What Graph sent is part of the run, not the end of it: the mail server's leg comes after,
+    // in the same row, which counts the message as sent by this run (not one kept from before).
+    let r = row(&a);
+    assert_eq!((r.state, r.sent, r.kept, a.session.sync_progress.accounts.len()), (RunState::Done, 1, false, 1));
     let (outbox, sent) =
         (a.session.mailbox.folder_of_kind(id, FolderKind::Outbox).unwrap(), a.session.mailbox.folder_of_kind(id, FolderKind::Sent).unwrap());
     assert_eq!((a.session.mailbox.count(outbox), a.session.mailbox.count(sent)), (0, 1));
@@ -1332,6 +1610,7 @@ fn microsoft_graph_sends_and_brings_the_calendar_before_the_mail() {
     // Soon after, with nothing to send: a Send/Receive the owner asked for still brings the days
     // of the calendar that are on screen (not the wide stretch, nor the contacts).
     assert_eq!(a.execute("ui.sync", json!({"account": id})).unwrap()["pending"], "graph");
+    assert_eq!(row(&a).phase, Some(SyncPhase::CalendarAndContacts));
     settle(&mut a);
     assert_eq!(*asked.lock().unwrap(), [(1, true, false), (0, false, true)]);
     // One that started by itself goes straight to the mail: the calendar keeps itself current.
@@ -1573,4 +1852,127 @@ fn copy_diagnostics_takes_the_hosts_report_or_says_what_it_can() {
     assert!(alone["text"].as_str().unwrap().contains(env!("CARGO_PKG_VERSION")));
     a.services.diagnostics = Some(Box::new(|| "the host's report".into()));
     assert_eq!(a.execute("ui.copyDiagnostics", json!({})).unwrap()["text"], "the host's report");
+}
+
+#[test]
+fn opening_a_damaged_mailbox_file_says_what_was_left_out() {
+    let said = |v: Value| crate::feedback("file.open", &v);
+    // Part of the file itself left out is said first, whichever of the counts says it.
+    let damaged = crate::damaged_mailbox_notice();
+    assert_eq!(said(json!({"lostSaves": 1, "unfinished": 300, "unavailable": 2})), Some(damaged.clone()));
+    assert_eq!(said(json!({"lostSaves": 0, "unfinished": 300})), Some(damaged.clone()));
+    // A damaged item of the file's first save is that too.
+    assert_eq!(said(json!({"lostSaves": 0, "unfinished": 0, "lostRecords": 1})), Some(damaged));
+    // Otherwise what the content folder lost, and nothing when nothing was.
+    assert!(said(json!({"lostSaves": 0, "unfinished": 0, "unavailable": 2})).unwrap().starts_with("2 parts of messages"));
+    assert_eq!(said(json!({"lostSaves": 0, "unfinished": 0, "unavailable": 0})), None);
+}
+
+/// R3 spec S30: mail imported for a Microsoft account goes to a local folder, and moving it into
+/// the account's folders is refused, with the reason in the status bar.
+#[test]
+fn imported_mail_for_a_microsoft_account_stays_in_a_local_folder_and_says_why() {
+    let mut a = app();
+    let account = a.run("account.add", json!({"email": "owner@example.org", "kind": "microsoft"})).unwrap()["id"].as_u64().unwrap();
+    let inbox = a.session.mailbox.folder_of_kind(account, mailcraft_model::FolderKind::Inbox).unwrap();
+    let id = first_message(&mut a);
+    let eml = a.execute("file.exportMessage", json!({"id": id})).unwrap();
+    let r = a.run("file.import", json!({"name": "in.eml", "data": eml["data"], "folder": inbox})).unwrap();
+    let said = a.status_msg.as_ref().map(|(text, _)| text.clone()).unwrap_or_default();
+    assert_eq!(said, "Imported 1 message into a local folder: Microsoft doesn't let a mail program put received mail into your mailbox");
+    let imported = r["ids"][0].as_u64().unwrap();
+    assert_ne!(a.session.mailbox.message(imported).unwrap().folder, inbox);
+    assert!(a.run("mail.move", json!({"ids": [imported], "folder": inbox})).is_err());
+    let said = a.status_msg.as_ref().map(|(text, _)| text.clone()).unwrap_or_default();
+    assert_eq!(said, "Microsoft doesn't let a mail program put received mail into your mailbox; it stays in a local folder.");
+    assert_ne!(a.session.mailbox.message(imported).unwrap().folder, inbox);
+}
+
+/// A search says so over the list: how many it found and where; ✕ or Esc ends it (#115).
+#[test]
+fn a_search_is_said_over_the_list_and_ended_by_its_cross_or_esc() {
+    use egui_kittest::kittest::Queryable;
+    let mut a = app();
+    let found = a.execute("view.search", json!({"query": "Atlas"})).unwrap()["found"].as_u64().unwrap();
+    assert!(found > 1);
+    let inbox = a.session.mailbox.folder(a.session.view.folder).map(|f| f.name.clone()).unwrap();
+    let mut h = window(a);
+    h.run_steps(3);
+    h.get_by_label(&format!("{found} results in {inbox}"));
+    // Every mailbox.
+    h.state_mut().execute("view.search", json!({"query": "Atlas", "scope": "everywhere"})).unwrap();
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("results in All Mailboxes").is_some());
+    // Nothing found.
+    h.state_mut().execute("view.search", json!({"query": "zzzzqq", "scope": "folder"})).unwrap();
+    h.run_steps(3);
+    h.get_by_label(&format!("No results in {inbox}"));
+    // The cross ends it.
+    let close = h.state().hit.rect("searchBarClose", 0).unwrap();
+    h.event(egui::Event::PointerMoved(close.center()));
+    h.event(egui::Event::PointerButton {
+        pos: close.center(),
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    h.event(egui::Event::PointerButton {
+        pos: close.center(),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run_steps(3);
+    assert!(h.state().session.view.search.is_empty());
+    assert!(h.query_by_label_contains("results in").is_none() && h.query_by_label_contains("No results").is_none());
+    // So does Esc, with the keyboard in the list.
+    h.state_mut().execute("view.search", json!({"query": "Atlas"})).unwrap();
+    h.run_steps(3);
+    for pressed in [true, false] {
+        h.event(egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    h.run_steps(2);
+    assert!(h.state().session.view.search.is_empty());
+}
+
+/// #122: signatures have one place in File, their own page; File › Options no longer has a
+/// Signatures section with a button that opens that page.
+#[test]
+fn signatures_are_in_file_once() {
+    use egui_kittest::kittest::Queryable as _;
+    let mut harness = window(app());
+    harness.state_mut().execute("ui.dismissReminder", json!({"all": true})).unwrap();
+    harness.state_mut().execute("ui.backstage", json!({"value": true, "page": "options"})).unwrap();
+    harness.run_steps(3);
+    assert!(harness.query_by_label_contains("Show week numbers").is_some());
+    // Neither the button nor the section's heading (File's list of pages is painted, not labelled).
+    assert!(harness.query_by_label("Signatures…").is_none());
+    assert!(harness.query_by_label("Signatures").is_none());
+    assert!(crate::backstage::PAGES.iter().any(|(page, ..)| *page == "signatures"));
+    harness.state_mut().execute("ui.backstage", json!({"value": true, "page": "signatures"})).unwrap();
+    harness.run_steps(3);
+    assert_eq!(harness.state().ui.backstage_page, "signatures");
+}
+
+/// File › Info for a Microsoft account: what comes after its card (the download choice, the link
+/// to connect the calendar) is laid out below the card, never over it or over each other (#121).
+#[test]
+fn info_account_card_keeps_what_follows_below_it() {
+    use egui_kittest::kittest::Queryable;
+    let mut a = app();
+    if let Some(acc) = a.session.mailbox.accounts.first_mut() {
+        acc.kind = mailcraft_model::AccountKind::Microsoft;
+    }
+    a.execute("ui.backstage", json!({"value": true, "page": "info"})).unwrap();
+    let mut h = window(a);
+    h.run_steps(3);
+    let rect = |n: egui_kittest::Node<'_>| n.rect();
+    let settings = rect(h.get_by_label("Settings"));
+    let download = rect(h.get_by_label_contains("Download messages in full"));
+    // The card is 58 pt, and Settings sits in its middle: the download line starts below the
+    // card's bottom edge, with the page's spacing between them.
+    let card_bottom = settings.center().y + 29.0;
+    assert!(download.min.y >= card_bottom + 8.0, "download {download:?} under the card ending at {card_bottom}");
 }

@@ -20,22 +20,24 @@ pub mod search;
 pub mod signature;
 pub mod sync;
 mod task;
+pub mod update;
+pub mod words;
 pub mod zoned;
 
 use serde::{Deserialize, Serialize};
 
-pub use address::{Address, format_list};
+pub use address::{Address, MAX_ADDRESS, format_list, mailbox_address};
 pub use calendar::{
     Attendee, Calendar, Event, Freq, MAX_JOIN_LINK, Occurrence, OnlineMeeting, OnlineProvider, Proposal, Recurrence, Response, ResponseOptions,
     ShowAs,
 };
 pub use contact::{Contact, Labeled, PostalAddress};
 pub use mailbox::{
-    Account, AccountKind, Category, Directory, Folder, FolderKind, Mailbox, OAuth, OAuthProvider, Pending, Queued, Security, Server, ServerFavorites,
-    ServerFolder,
+    Account, AccountKind, BETWEEN_MAILBOXES, Category, Directory, DownloadInFull, Folder, FolderKind, GraphSwitch, IMPORTED, INTO_GRAPH, MAX_SHARED,
+    Mailbox, OAuth, OAuthProvider, Pending, Queued, STAYS_LOCAL, Security, Server, ServerFavorites, ServerFolder,
 };
 pub use mailcraft_time as time;
-pub use message::{Attachment, Body, FlagStatus, Importance, Message, normalize_subject};
+pub use message::{Answers, Attachment, Body, ContentRef, FlagStatus, Importance, KeptBody, Message, normalize_subject, text_hash};
 pub use remote::Origin;
 pub use rich::{RichBody, RichText};
 pub use rule::{Action, Condition, Rule};

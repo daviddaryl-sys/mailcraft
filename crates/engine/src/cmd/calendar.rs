@@ -961,7 +961,11 @@ fn categorize(s: &mut Session, v: &Value) -> CmdResult {
 
 fn from_message(s: &mut Session, v: &Value) -> CmdResult {
     let mid = p::id(v, "id").or(s.sel.focus()).ok_or_else(|| fail("select a message first"))?;
-    let m = s.mailbox.message(mid).cloned().ok_or_else(|| fail(format!("no message with id {mid}")))?;
+    if s.mailbox.message(mid).is_none() {
+        return Err(fail(format!("no message with id {mid}")));
+    }
+    // Its text goes into the meeting: from where the mailbox keeps it when it isn't in memory.
+    let m = s.loaded_message_where(mid, |_| false)?;
     let mine: Vec<String> = s.mailbox.accounts.iter().map(|a| a.email.to_lowercase()).collect();
     // Everyone on the message but me.
     let mut people: Vec<Address> = Vec::new();

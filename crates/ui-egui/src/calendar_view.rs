@@ -2005,9 +2005,7 @@ fn event_input(app: &mut MailApp, resp: Response, item: &Item, tips: bool) {
         // Open acts on the selection: in a window of its own, or in the form here where there
         // are no such windows.
         let _ = app.execute("calendar.select", json!({"id": id, "day": day}));
-        let said = app.status_msg.clone();
-        if app.run("ui.openWindow", json!({"event": id})).is_err() {
-            app.status_msg = said;
+        if app.run_or_else("ui.openWindow", json!({"event": id})).is_err() {
             let _ = app.run("calendar.edit", json!({}));
         }
     } else if resp.clicked() {
@@ -2657,12 +2655,10 @@ fn key_pressed(app: &mut MailApp, ctx: &egui::Context, frame: &mut Frame, key: e
         }
         // Enter on a pick is the pick's own ([`slot_entry`]); with an event selected it opens it.
         Key::Enter if !alt && !command && load_slot(ctx).is_none() => {
-            if let Some(id) = app.session.sel.event {
-                let said = app.status_msg.clone();
-                if app.run("ui.openWindow", json!({"event": id})).is_err() {
-                    app.status_msg = said;
-                    let _ = app.run("calendar.edit", json!({}));
-                }
+            if let Some(id) = app.session.sel.event
+                && app.run_or_else("ui.openWindow", json!({"event": id})).is_err()
+            {
+                let _ = app.run("calendar.edit", json!({}));
             }
             false
         }
@@ -7118,8 +7114,13 @@ mod tests {
         rig.drag(from, to);
         rig.drop_at(to);
         rig.frames(6);
-        assert_eq!((rig.event("Roadmap").calendar, rig.dialog()), (main, None));
+        // Refused at once: the reason in a message box (#152) and in the status bar; OK (Enter)
+        // closes it.
+        assert_eq!((rig.event("Roadmap").calendar, rig.dialog()), (main, Some("refused")));
         assert!(rig.said().starts_with("A meeting can't be moved to another calendar"), "{}", rig.said());
+        rig.key(egui::Key::Enter);
+        rig.frames(2);
+        assert_eq!(rig.dialog(), None);
         assert_eq!(*rig.event("Roadmap"), *planning);
         // With Ctrl it is copied there: an appointment of its own, to which nobody is invited.
         rig.drag(from, to);
@@ -7163,8 +7164,11 @@ mod tests {
         assert_eq!(rig.dragging().map(|drag| drag.into), Some(own), "the gesture is there to be made");
         rig.drop_at(to);
         rig.frames(6);
-        assert_eq!((rig.event("Physio").calendar, rig.dialog()), (of_server, None));
+        assert_eq!((rig.event("Physio").calendar, rig.dialog()), (of_server, Some("refused")));
         assert!(rig.said().contains("kept by the server") && rig.said().contains("not out of it"), "{}", rig.said());
+        rig.key(egui::Key::Enter);
+        rig.frames(2);
+        assert_eq!(rig.dialog(), None);
         assert_eq!(server.lock().unwrap().events.len(), 2);
         // A copy of it can be kept here, and nothing of that reaches the server.
         rig.drag(from, to);
@@ -7272,6 +7276,11 @@ mod tests {
         rig.key(egui::Key::Enter);
         assert_eq!(rig.app.session.mailbox.events.len(), events);
         assert!(rig.said().contains("can only be read"), "{}", rig.said());
+        // (In a message box too, #152: OK closes it.)
+        assert_eq!(rig.dialog(), Some("refused"));
+        rig.key(egui::Key::Enter);
+        rig.frames(2);
+        assert_eq!(rig.dialog(), None);
         // One that can be changed is picked by its name as ever.
         rig.click(rig.app.hit.rect("calendarName", team).unwrap().center(), 1);
         assert_eq!(rig.current(), team);

@@ -409,6 +409,14 @@ pub fn paint(p: &Painter, r: Rect, name: &str, c: Color32, accent: Color32) {
             pen.frect(14.0, 13.0, 16.0, 15.0, c);
         }
         "sync" | "request" | "sendReceive" => pen.loop_arrows(c, a),
+        // Send/Receive Progress: accounts one under another, how far each has got.
+        "syncProgress" => {
+            for (n, done) in [(0.0, 13.0), (1.0, 8.0), (2.0, 4.5)] {
+                let y = 5.0 + n * 5.0;
+                pen.rect(3.0, y, 17.0, y + 2.5, c);
+                pen.frect(3.0, y, done, y + 2.5, a);
+            }
+        }
         "showAs" => {
             pen.rect(3.5, 4.0, 16.5, 16.0, c);
             pen.frect(3.5, 4.0, 7.0, 16.0, a);
@@ -783,6 +791,7 @@ pub const NAMES: &[&str] = &[
     "repeat",
     "scheduling",
     "sync",
+    "syncProgress",
     "request",
     "sendReceive",
     "showAs",

@@ -10,8 +10,12 @@
 //!
 //! Tables: columns get the widths their contents and the source's hints call for, squeezed to the
 //! room there is. A data table is never squeezed below its longest words (the pane scrolls
-//! sideways instead) and never stacked. A layout table whose columns would be too narrow is
-//! stacked: its cells one under the other, each as wide as the room.
+//! sideways instead) and never stacked. A layout table whose columns would be too narrow for
+//! what is in them is stacked: its cells one under the other, each as wide as the room. A row of a
+//! layout table whose cells each hold one line has them on its middle.
+//!
+//! Pictures and text that the message has in one line (`<img> 12`) stand side by side in it,
+//! on its middle, when the line fits; else each takes lines of its own.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -347,6 +351,15 @@ impl Cx<'_> {
         }
     }
 
+    /// The next text goes on in the line of the one before, after a space; unless what was to
+    /// stand in front of the line was not taken yet (the line began with a picture that is
+    /// copied as nothing).
+    fn beside(&mut self) {
+        if self.pend == Join::default() {
+            self.pend = Join { glue: Some(' '), ..Join::default() };
+        }
+    }
+
     /// The next text starts a row of a table, or a cell that stands under the one before.
     fn row(&mut self) {
         self.pend = Join { lines: self.pend.lines.max(1), ..Join::default() };
@@ -448,26 +461,38 @@ fn place(cx: &mut Cx<'_>, flow: &mut Flow, blocks: &[Block], index: usize, depth
     // that was cut, else a line break and the blank lines above the block.
     match cx.cuts.get(index).copied().flatten().filter(|_| depth == 0) {
         Some(glue) => cx.pend = Join { cont: true, glue, ..Join::default() },
+        // What stands in the line of the block before is copied in that line, whether there was
+        // room to show it there or not.
+        None if block.beside => cx.beside(),
         None if flow.prev.is_some() => cx.line(block.space),
         None => {}
     }
     let mut used = 1;
-    let (bottom, kind) = match &block.kind {
-        BlockKind::Rule => {
+    // Pictures and text in one line, when they fit in it.
+    let line = match line_length(blocks, index) {
+        0 => None,
+        n => blocks.get(index..index + n).and_then(|run| mixed_line(cx, run, x, top, width, flow.paper)).map(|bottom| (n, bottom)),
+    };
+    let (bottom, kind) = match (&block.kind, line) {
+        (_, Some((n, bottom))) => {
+            used = n;
+            (bottom, PrevKind::Text)
+        }
+        (BlockKind::Rule, None) => {
             let line = Rect::from_min_size(pos2(x, top + (RULE_HEIGHT / 2.0).floor()), vec2(width, 1.0));
             cx.fill(line, flow.paper.line(&cx.t));
             (top + RULE_HEIGHT, PrevKind::Other)
         }
-        BlockKind::Image { .. } => {
+        (BlockKind::Image { .. }, None) => {
             used = run_length(blocks, index);
             let run = blocks.get(index..index + used).unwrap_or_default();
             (pictures(cx, run, x, top, width, flow.paper), PrevKind::Picture)
         }
-        BlockKind::Table(table) => {
+        (BlockKind::Table(table), None) => {
             let bottom = table_block(cx, table, block.align, x, top, width, flow.paper, depth);
             (bottom, if table.layout { PrevKind::Other } else { PrevKind::DataTable })
         }
-        other => {
+        (other, None) => {
             let kind = match other {
                 BlockKind::Heading(_) => PrevKind::Heading,
                 BlockKind::ListItem { .. } => PrevKind::List,
@@ -861,33 +886,114 @@ fn pictures(cx: &mut Cx<'_>, run: &[Block], x: f32, y: f32, width: f32, paper: P
             Align::Right => (width - line).max(0.0),
         };
         for tile in tiles.get(start..end).unwrap_or_default() {
-            let BlockKind::Image { src, link, .. } = &tile.block.kind else { continue };
-            let rect = Rect::from_min_size(pos2(at, y + height - tile.size.y), tile.size);
-            let link = link.as_deref().map(Arc::from);
-            match &tile.data {
-                Some(data) => cx.push_seg(rect, ItemKind::Picture(PictureItem { data: data.clone(), alt: tile.label.clone(), link, paper })),
-                None => {
-                    let remote = !mailcraft_html::is_embedded(src);
-                    // A picture that is not shown is copied as its description, when it has one;
-                    // a space stands between two of those in a line.
-                    let described = tile.described && !tile.label.is_empty();
-                    let join = match described {
-                        true if said => Join { glue: Some(' '), ..cx.join() },
-                        true => cx.join(),
-                        false => Join::default(),
-                    };
-                    said |= described;
-                    let label = tile.label.clone();
-                    let stand_in = PlaceholderItem { label, src: Arc::from(src.as_str()), link, paper, remote, described, join };
-                    cx.push_seg(rect, ItemKind::Placeholder(stand_in));
-                }
-            }
+            put_tile(cx, tile, Rect::from_min_size(pos2(at, y + height - tile.size.y), tile.size), paper, &mut said);
             at += tile.size.x + PICTURE_GAP;
         }
         y += height + if end < tiles.len() { PICTURE_GAP } else { 0.0 };
         start = end.max(start + 1);
     }
     y
+}
+
+/// Put a picture, or what stands for it, at `rect`. `said`: a description of a picture in the
+/// same line was given its place in a copy already.
+fn put_tile(cx: &mut Cx<'_>, tile: &Tile<'_>, rect: Rect, paper: Paper, said: &mut bool) {
+    let BlockKind::Image { src, link, .. } = &tile.block.kind else { return };
+    let link = link.as_deref().map(Arc::from);
+    match &tile.data {
+        Some(data) => cx.push_seg(rect, ItemKind::Picture(PictureItem { data: data.clone(), alt: tile.label.clone(), link, paper })),
+        None => {
+            let remote = !mailcraft_html::is_embedded(src);
+            // A picture that is not shown is copied as its description, when it has one;
+            // a space stands between two of those in a line.
+            let described = tile.described && !tile.label.is_empty();
+            let join = match described {
+                true if *said => Join { glue: Some(' '), ..cx.join() },
+                true => cx.join(),
+                false => Join::default(),
+            };
+            *said |= described;
+            let label = tile.label.clone();
+            let stand_in = PlaceholderItem { label, src: Arc::from(src.as_str()), link, paper, remote, described, join };
+            cx.push_seg(rect, ItemKind::Placeholder(stand_in));
+        }
+    }
+}
+
+// ---- pictures and text in one line ----
+
+/// Whether a block can stand in a line of pictures and text: a picture, or a paragraph or a
+/// heading short enough to be one line.
+fn in_line(block: &Block) -> bool {
+    match &block.kind {
+        BlockKind::Image { .. } => true,
+        BlockKind::Paragraph | BlockKind::Heading(_) => {
+            block.spans.iter().map(|s| s.text.len()).sum::<usize>() <= MEASURED_CHARS && !block.spans.iter().any(|s| s.text.contains('\n'))
+        }
+        _ => false,
+    }
+}
+
+/// How many blocks from `index` make one line of pictures and text (`<img> 12`, a logo and a
+/// name): the block and those the message has beside it, when there are both pictures and text
+/// among them; 0 when there is no such line.
+fn line_length(blocks: &[Block], index: usize) -> usize {
+    let Some(first) = blocks.get(index).filter(|b| in_line(b)) else { return 0 };
+    let n = 1 + blocks.iter().skip(index + 1).take(MAX_RUN - 1).take_while(|b| b.beside && b.quote == first.quote && in_line(b)).count();
+    let run = blocks.get(index..index + n).unwrap_or_default();
+    let picture = |b: &Block| matches!(b.kind, BlockKind::Image { .. });
+    if n > 1 && run.iter().any(picture) && !run.iter().all(picture) { n } else { 0 }
+}
+
+/// The size of a short text set in one line.
+fn line_size(cx: &mut Cx<'_>, block: &Block, paper: Paper) -> Vec2 {
+    let (job, ..) = text_job(&cx.t, &block.spans, &block.kind, paper, block.quote > 0, f32::INFINITY, Align::Left);
+    let size = cx.measure(job).size();
+    vec2(size.x.ceil() + 1.0, size.y)
+}
+
+/// Lay out pictures and text that stand in one line, side by side and centred on the line's
+/// middle, the line placed as the first of them asks; the bottom. `None`, and nothing laid out,
+/// when they do not fit in `width`: then each takes its own lines, as before.
+fn mixed_line(cx: &mut Cx<'_>, run: &[Block], x: f32, y: f32, width: f32, paper: Paper) -> Option<f32> {
+    let mut sizes = Vec::with_capacity(run.len());
+    for block in run {
+        sizes.push(match block.kind {
+            BlockKind::Image { .. } => tile(cx, block, width, false).size,
+            _ => line_size(cx, block, paper),
+        });
+    }
+    let length = sizes.iter().map(|s| s.x).sum::<f32>() + PICTURE_GAP * run.len().saturating_sub(1) as f32;
+    if !length.is_finite() || length > width + 0.5 {
+        return None;
+    }
+    let height = sizes.iter().map(|s| s.y).fold(0.0, f32::max);
+    let align = run.first().map_or(Align::Left, |b| b.align);
+    let mut at = x + match align {
+        Align::Left => 0.0,
+        Align::Center => ((width - length) / 2.0).max(0.0),
+        Align::Right => (width - length).max(0.0),
+    };
+    let mut said = false;
+    for (n, (block, size)) in run.iter().zip(&sizes).enumerate() {
+        // A copy has a space between the things of the line, not a line break.
+        if n > 0 {
+            cx.beside();
+        }
+        let top = y + ((height - size.y) / 2.0).max(0.0);
+        match block.kind {
+            BlockKind::Image { .. } => {
+                let tile = tile(cx, block, width, true);
+                put_tile(cx, &tile, Rect::from_min_size(pos2(at, top), tile.size), paper, &mut said);
+            }
+            _ => {
+                let alone = Block { align: Align::Left, space: 0, beside: false, ..block.clone() };
+                text(cx, &alone, at, top, size.x, paper);
+            }
+        }
+        at += size.x + PICTURE_GAP;
+    }
+    Some(y + height)
 }
 
 // ---- how wide things want to be ----
@@ -906,7 +1012,26 @@ fn blocks_extent(cx: &mut Cx<'_>, blocks: &[Block], depth: usize) -> Extent {
     while let Some(block) = blocks.get(i) {
         let indent = f32::from(block.quote.min(MAX_QUOTE_LEVELS)) * QUOTE_INDENT;
         let mut used = 1;
+        let line = line_length(blocks, i);
         let extent = match &block.kind {
+            // A line of pictures and text: as long as all of them, and when it is short of room
+            // each stands on its own.
+            _ if line > 0 => {
+                used = line;
+                let mut extent = Extent::default();
+                for (n, part) in blocks.iter().skip(i).take(line).enumerate() {
+                    let own = match part.kind {
+                        BlockKind::Image { .. } => {
+                            let tile = tile(cx, part, WIDE, false);
+                            Extent { min: tile.wanted.min(48.0), max: tile.wanted }
+                        }
+                        _ => text_extent(cx, part),
+                    };
+                    extent.min = extent.min.max(own.min);
+                    extent.max += own.max + if n > 0 { PICTURE_GAP } else { 0.0 };
+                }
+                extent
+            }
             BlockKind::Rule => Extent::default(),
             BlockKind::Image { .. } => {
                 used = run_length(blocks, i);
@@ -1038,14 +1163,32 @@ fn painted(table: &Table) -> bool {
     table.background.is_some() || table.border || table.outline
 }
 
-/// The room between a cell's edge and what is in it.
-fn padding(table: &Table, cell: &Cell) -> Vec2 {
+/// Whether a layout table is ruled: lines above or under some of its cells, and nothing else
+/// painted (no colour, no line down the side of a cell). Its rows are read across like a data
+/// table's: every cell has the same room round what it holds, and the lines run on from one
+/// column to the next.
+fn ruled(table: &Table) -> bool {
+    if !table.layout || painted(table) {
+        return false;
+    }
+    let mut lines = false;
+    for cell in table.rows.iter().flat_map(|r| &r.cells) {
+        if cell.background.is_some() || cell.border.left || cell.border.right {
+            return false;
+        }
+        lines |= cell.border.top || cell.border.bottom;
+    }
+    lines
+}
+
+/// The room between a cell's edge and what is in it; `ruled`: [`ruled`] of the table.
+fn padding(table: &Table, ruled: bool, cell: &Cell) -> Vec2 {
     if !table.layout {
         DATA_PADDING
     } else if cell.blocks.is_empty() {
         // A cell that is only a colour or a line: a band or a divider.
         vec2(0.0, 3.0)
-    } else if painted(table) || cell.background.is_some() || cell.border.any() {
+    } else if ruled || painted(table) || cell.background.is_some() || cell.border.any() {
         BOX_PADDING
     } else {
         Vec2::ZERO
@@ -1054,7 +1197,7 @@ fn padding(table: &Table, cell: &Cell) -> Vec2 {
 
 /// The gaps between the columns and between the rows.
 fn gaps(table: &Table) -> Vec2 {
-    if !table.layout || painted(table) {
+    if !table.layout || painted(table) || ruled(table) {
         return Vec2::ZERO;
     }
     // Rows of pictures and nothing else are slices of one picture: each stands right on the
@@ -1077,9 +1220,10 @@ fn columns(cx: &mut Cx<'_>, table: &Table, grid: &Grid<'_>, depth: usize) -> Col
     let n = grid.columns;
     let mut out = Columns { min: vec![0.0; n], max: vec![0.0; n], fixed: vec![false; n], share: vec![0.0; n] };
     let gap = gaps(table).x;
+    let ruled = ruled(table);
     let mut spanning = Vec::new();
     for placed in &grid.cells {
-        let pad = padding(table, placed.cell).x * 2.0;
+        let pad = padding(table, ruled, placed.cell).x * 2.0;
         let extent = blocks_extent(cx, &placed.cell.blocks, depth + 1);
         // A cell with something in it gets the least room anything is laid out in.
         let least = if placed.cell.blocks.is_empty() { 0.0 } else { MIN_CELL };
@@ -1167,7 +1311,9 @@ fn column_widths(cx: &mut Cx<'_>, table: &Table, grid: &Grid<'_>, room: f32, dep
     let most: f32 = columns.max.iter().sum::<f32>() + between;
     let mut total = asked.unwrap_or(most.min(room));
     if table.layout {
-        if n > 1 && (least > room + 0.5 || room / (n as f32) < MIN_LAYOUT_COLUMN) {
+        // Stacked when its columns can't be had without breaking words, or would be narrow and
+        // squeezed; never when everything fits at the width it wants (a row of icons).
+        if n > 1 && (least > room + 0.5 || (most > room + 0.5 && room / (n as f32) < MIN_LAYOUT_COLUMN)) {
             return None;
         }
         total = total.min(room).max(least.min(room));
@@ -1329,6 +1475,7 @@ fn table_block(cx: &mut Cx<'_>, table: &Table, align: Align, x: f32, y: f32, roo
     let around = table.background.map_or(paper, |bg| Paper::of(bg, &cx.t));
     let table_slot = table.background.map(|_| cx.slot());
     let gap = gaps(table);
+    let ruled = ruled(table);
     // The left edge of each column, and the right edge of the last.
     let mut edges = Vec::with_capacity(widths.len() + 1);
     let mut at = x;
@@ -1352,15 +1499,20 @@ fn table_block(cx: &mut Cx<'_>, table: &Table, align: Align, x: f32, y: f32, roo
         tops.push(top);
         let cells = grid.cells.iter().skip(next).take_while(|p| p.row == row).map(|p| p.cell);
         let mut across = Across::begin(cx, table, row == 0, cells);
+        // Per cell of the row: what it pushed, its top and its bottom.
+        let mut laid: Vec<(Range<usize>, f32)> = Vec::new();
         while let Some(placed) = grid.cells.get(next).filter(|p| p.row == row) {
             across.cell(cx);
+            let first = cx.items.len();
             let (left, right) = span(placed.col, placed.cols);
-            let pad = padding(table, placed.cell);
+            let pad = padding(table, ruled, placed.cell);
             let (inside, own) = cell_paper(cx, table, placed.cell, around);
             let slot = own.then(|| cx.slot());
             let width = (right - left - pad.x * 2.0).max(MIN_CELL.min(right - left));
             let bottom = flow(cx, &placed.cell.blocks, left + pad.x.min((right - left) / 2.0), top + pad.y, width, inside, depth + 1) + pad.y;
             done.push((next, slot, inside, bottom));
+            let alone = placed.rows == 1 && !placed.cell.blocks.iter().any(|b| matches!(b.kind, BlockKind::Table(_)));
+            laid.push((if alone { first..cx.items.len() } else { 0..0 }, bottom));
             next += 1;
         }
         across.end(cx);
@@ -1368,6 +1520,20 @@ fn table_block(cx: &mut Cx<'_>, table: &Table, align: Align, x: f32, y: f32, roo
             .iter()
             .filter_map(|(index, _, _, bottom)| grid.cells.get(*index).filter(|p| p.row + p.rows - 1 == row).map(|_| *bottom))
             .fold(top, f32::max);
+        // A row of a layout table whose cells each hold one line (a number and its icon, a
+        // label and a picture) has them on the row's middle, as a table cell is unless told
+        // otherwise. A cell with more in it stays at the top: whether it was told otherwise is
+        // not read.
+        if table.layout && laid.iter().all(|(items, _)| items.is_empty() || one_line(cx.items.get(items.clone()).unwrap_or_default())) {
+            for (items, cell_bottom) in laid {
+                let dy = ((bottom - cell_bottom) / 2.0).floor();
+                if dy >= 1.0 {
+                    for item in cx.items.get_mut(items).unwrap_or_default() {
+                        item.rect = item.rect.translate(vec2(0.0, dy));
+                    }
+                }
+            }
+        }
         bottoms.push(bottom);
         top = bottom + gap.y;
     }
@@ -1403,12 +1569,35 @@ fn table_block(cx: &mut Cx<'_>, table: &Table, align: Align, x: f32, y: f32, roo
     bottom
 }
 
+/// Whether what a cell pushed is one line: texts of one line each and pictures, side by side.
+fn one_line(items: &[Item]) -> bool {
+    let mut seen = false;
+    let (mut low, mut high) = (f32::NEG_INFINITY, f32::INFINITY);
+    for item in items {
+        match &item.kind {
+            ItemKind::Text(text) => {
+                let line = text.job.sections.iter().filter_map(|s| s.format.line_height).fold(0.0, f32::max);
+                if line <= 0.0 || item.rect.height() > line * 1.5 {
+                    return false;
+                }
+            }
+            ItemKind::Picture(_) | ItemKind::Placeholder(_) => {}
+            _ => continue,
+        }
+        seen = true;
+        low = low.max(item.rect.min.y);
+        high = high.min(item.rect.max.y);
+    }
+    seen && low < high + 0.5
+}
+
 /// A layout table with no room for its columns: its cells one under the other, each as wide as the room.
 fn stacked(cx: &mut Cx<'_>, table: &Table, x: f32, y: f32, room: f32, paper: Paper, depth: usize) -> f32 {
     let around = table.background.map_or(paper, |bg| Paper::of(bg, &cx.t));
     let table_slot = table.background.map(|_| cx.slot());
     let line = around.line(&cx.t);
     let between = gaps(table).y;
+    let ruled = ruled(table);
     let mut at = y;
     let mut first = true;
     for (n, row) in table.rows.iter().enumerate() {
@@ -1421,7 +1610,7 @@ fn stacked(cx: &mut Cx<'_>, table: &Table, x: f32, y: f32, room: f32, paper: Pap
                 at += between;
             }
             first = false;
-            let pad = padding(table, cell);
+            let pad = padding(table, ruled, cell);
             let (inside, own) = cell_paper(cx, table, cell, around);
             let slot = own.then(|| cx.slot());
             let width = (room - pad.x * 2.0).max(MIN_CELL.min(room));

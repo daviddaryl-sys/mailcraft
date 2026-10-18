@@ -238,6 +238,12 @@ fn serve(stream: TcpStream, tx: Sender<ControlRequest>, ctx: egui::Context, key:
             continue;
         }
         let (req, rrx) = ControlRequest::new(method, params);
+        // Marked by the MCP bridge (`agent`): the window's gate for agents decides, and asks the
+        // owner about what needs them. A request without it is the owner's own script.
+        let req = match msg.get("agent") {
+            Some(a) => req.from_agent(mailcraft_ui_egui::control::agent_allow(a)),
+            None => req,
+        };
         if tx.send(req).is_err() {
             break;
         }
@@ -357,6 +363,24 @@ mod tests {
         let mut c = Conn::open(port);
         assert_eq!(c.call(r#"{"id":1,"method":"auth","key":"nope"}"#)["error"], "unauthorized");
         assert!(c.closed());
+    }
+
+    #[test]
+    fn requests_marked_as_an_agents_reach_the_gate_as_such() {
+        let (port, rx) = boot();
+        let mut c = Conn::open(port);
+        c.send(&format!(r#"{{"id":1,"key":"{KEY}","agent":{{"allow":["input","bogus"]}},"method":"mail.flag","params":{{"agent":null}}}}"#));
+        let req = answer(&rx);
+        assert_eq!(req.agent, Some(vec![mailcraft_engine::agent::Class::Input]));
+        assert_eq!(c.recv()["ok"], true);
+        // Any `agent` field at all marks it, allowing nothing it doesn't name.
+        c.send(&format!(r#"{{"id":2,"key":"{KEY}","agent":true,"method":"mail.flag"}}"#));
+        assert_eq!(answer(&rx).agent, Some(vec![]));
+        assert_eq!(c.recv()["ok"], true);
+        // Without it, the owner's own script, as before; a param can't mark or unmark it.
+        c.send(&format!(r#"{{"id":3,"key":"{KEY}","method":"mail.flag","params":{{"agent":{{"allow":["send"]}}}}}}"#));
+        assert_eq!(answer(&rx).agent, None);
+        assert_eq!(c.recv()["ok"], true);
     }
 
     #[test]

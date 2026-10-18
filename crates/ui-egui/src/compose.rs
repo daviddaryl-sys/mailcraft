@@ -15,17 +15,18 @@ const LABEL_W: f32 = 62.0;
 
 /// One labelled single-line field. Returns the new text when it was edited.
 fn field(ui: &mut Ui, label: &str, text: &str, hint: &str, focus: bool) -> Option<String> {
-    field_at(ui, label, text, hint, focus).0
+    field_at(ui, label, text, hint, focus, 0.0).0
 }
 
 /// [`field`], also answering where the text is and how it responded.
-fn field_at(ui: &mut Ui, label: &str, text: &str, hint: &str, focus: bool) -> (Option<String>, Rect, egui::Response) {
+/// `right` is room kept free at the line's right end for something drawn there (the Bcc link).
+fn field_at(ui: &mut Ui, label: &str, text: &str, hint: &str, focus: bool, right: f32) -> (Option<String>, Rect, egui::Response) {
     let t = Tokens::get(ui.ctx());
     let mut buf = text.to_string();
     let mut changed = None;
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
     ui.painter().text(pos2(r.min.x + 16.0, r.center().y), Align2::LEFT_CENTER, label, regular(12.0), t.text_dim);
-    let edit_rect = Rect::from_min_max(pos2(r.min.x + 16.0 + LABEL_W, r.min.y + 3.0), pos2(r.max.x - 12.0, r.max.y - 3.0));
+    let edit_rect = Rect::from_min_max(pos2(r.min.x + 16.0 + LABEL_W, r.min.y + 3.0), pos2(r.max.x - 12.0 - right, r.max.y - 3.0));
     let edit = egui::TextEdit::singleline(&mut buf)
         .id(ui.id().with(("compose", label)))
         .frame(egui::Frame::NONE)
@@ -78,6 +79,11 @@ pub(crate) fn completed(text: &str, who: &mailcraft_engine::cmd::compose::Sugges
     format!("{before}{gap}{written}; ")
 }
 
+/// Whether the quiet Bcc link is shown (no Bcc line yet).
+fn bcc_link(app: &MailApp) -> bool {
+    app.session.compose.as_ref().is_some_and(|c| c.bcc.is_empty()) && !app.compose_bcc
+}
+
 /// A recipient line: as it is typed in, the people it could be are offered underneath (contacts,
 /// then whoever mail was exchanged with); arrow keys choose, Enter or Tab or a click takes one.
 fn recipient_field(app: &mut MailApp, ui: &mut Ui, key: &str, label: &str, text: &str, hint: &str, focus: bool) {
@@ -105,7 +111,10 @@ fn recipient_field(app: &mut MailApp, ui: &mut Ui, key: &str, label: &str, text:
             }
         });
     }
-    let (changed, at, resp) = field_at(ui, label, text, hint, focus);
+    // The Bcc link sits at the right end of the To line: a click there is for it, so the line's
+    // text stops short of it (a long To line was otherwise impossible to click at its end).
+    let right = if key == "to" && bcc_link(app) { 44.0 } else { 0.0 };
+    let (changed, at, resp) = field_at(ui, label, text, hint, focus, right);
     let mut now = changed.clone().unwrap_or_else(|| text.to_string());
     if open {
         let shown = egui::Area::new(store.with(key)).order(egui::Order::Foreground).fixed_pos(pos2(at.min.x, at.max.y + 2.0)).show(ui.ctx(), |ui| {
@@ -286,7 +295,7 @@ pub fn show(app: &mut MailApp, ui: &mut Ui) {
     if let Some(new) = field(ui, tl!("Subject"), &c.subject, "", false) {
         let _ = app.execute("compose.set", json!({"subject": new}));
     }
-    if c.bcc.is_empty() && !app.compose_bcc {
+    if bcc_link(app) {
         // A quiet way to get the Bcc line.
         let last = ui.min_rect();
         let br = Rect::from_min_size(
@@ -342,7 +351,14 @@ pub fn show(app: &mut MailApp, ui: &mut Ui) {
             editor::show(app, ui, room, fresh && !focus_to);
             if c.quote {
                 ui.add_space(8.0);
-                crate::reading::show_quote(app, ui);
+                // The original senses the pointer over all of the view it is drawn in: kept to
+                // below where it begins, so that it doesn't lie over the owner's text and take a
+                // click meant for it (the body then never got the keyboard back, #158).
+                let below = Rect::everything_below(ui.cursor().min.y);
+                ui.scope(|ui| {
+                    ui.set_clip_rect(ui.clip_rect().intersect(below));
+                    crate::reading::show_quote(app, ui);
+                });
             }
         });
     });

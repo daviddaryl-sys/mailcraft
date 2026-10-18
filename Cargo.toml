@@ -4,15 +4,16 @@ members = ["crates/*", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/mailcraft", "apps/mailcraft-cli", "xtask"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.3"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-rust-version = "1.90"
-repository = "https://github.com/UCS-Care-Group/mailcraft"
+rust-version = "1.95"
+repository = "https://github.com/daviddaryl-sys/mailcraft"
 
 [workspace.dependencies]
 # internal
 mailcraft-time = { path = "crates/time" }
+mailcraft-charset = { path = "crates/charset" }
 mailcraft-model = { path = "crates/model" }
 mailcraft-html = { path = "crates/html" }
 mailcraft-mime = { path = "crates/mime" }
@@ -32,6 +33,10 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 log = "0.4"
 proptest = "1"
 base64 = "0.22"
+# Character sets by the WHATWG Encoding Standard, for mail in any of the sets it names
+# (windows-1250, iso-8859-2, koi8-r, shift_jis, iso-2022-jp…), and vCard files: `mailcraft-charset`.
+# (Apache-2.0 OR MIT) AND BSD-3-Clause, Rust throughout, builds for the browser.
+encoding_rs = "0.8"
 getrandom = "0.3"
 # Time zones: the IANA Time Zone Database compiled in (`tzdb-bundle-always`: the same rules on
 # every platform and in the browser) and the system's own zone. Unlicense OR MIT; the database is
@@ -66,6 +71,13 @@ egui_kittest = "0.36"
 rfd = "0.17"
 arboard = { version = "3.6", default-features = false }
 
+# craft-libs (https://github.com/storytold/craft-libs): code shared by the Craft apps, taken from
+# git pinned to one commit (`rev`); review the diff before moving the pin. Only `craft-quit`, in
+# the desktop app alone: on macOS MailCraft quits through `-[NSApplication terminate:]` rather
+# than by closing its window, which can crash AppKit (its Touch Bar), and its app menu's Quit (⌘Q)
+# asks first, as the close button does. `menu` brings muda on macOS only. Needs Rust 1.95.
+craft-quit = { git = "https://github.com/storytold/craft-libs", rev = "8f5a2831614e632f91ad367f7af2a6e5b61b9529", features = ["menu"] }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
@@ -86,3 +98,8 @@ opt-level = 3
 lto = "thin"
 codegen-units = 16
 debug = 0
+
+[patch.crates-io]
+# winit 0.30.13 with an activation token that names the latest click, which KWin needs before it
+# brings the browser forward (#144). Dropped when winit itself does it.
+winit = { git = "https://github.com/UCS-Care-Group/winit", rev = "bb472d90071a8b48288aeaa70ad81b767808ae9a" }

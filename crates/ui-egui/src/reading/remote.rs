@@ -370,6 +370,14 @@ fn short(text: &str, max: usize) -> String {
     if text.chars().count() > max { text.chars().take(max.saturating_sub(1)).chain(['…']).collect() } else { text.to_string() }
 }
 
+/// The strip a notice above a message is drawn in: a wash of `hue` over whatever the header is
+/// painted on, with an edge of it, in light and dark alike.
+pub(crate) fn notice(hue: Color32, t: &Tokens) -> egui::Frame {
+    let wash = Color32::from_rgba_unmultiplied(hue.r(), hue.g(), hue.b(), if t.dark { 46 } else { 30 });
+    let edge = Color32::from_rgba_unmultiplied(hue.r(), hue.g(), hue.b(), if t.dark { 110 } else { 90 });
+    egui::Frame::NONE.fill(wash).stroke(Stroke::new(1.0, edge)).corner_radius(4.0).inner_margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 4 })
+}
+
 /// The bar above a message that has pictures on the web: that they are not shown and what the
 /// owner can do about it, how downloading them is going, or how many could not be had. One
 /// glance says which: a tinted strip the width of the header, a mark, a few words in bold, the
@@ -398,17 +406,8 @@ pub fn line(app: &mut MailApp, ui: &mut Ui, m: &Message, doc: &Doc, access: Acce
             n => (count(tl!("{n} pictures couldn't be downloaded."), n), tl!("Point at one to see why.").to_string(), true),
         },
     };
-    // A wash of the notice's colour over whatever the header is painted on, in light and dark alike.
     let hue = if trouble { t.orange } else { t.blue };
-    let wash = Color32::from_rgba_unmultiplied(hue.r(), hue.g(), hue.b(), if t.dark { 46 } else { 30 });
-    let edge = Color32::from_rgba_unmultiplied(hue.r(), hue.g(), hue.b(), if t.dark { 110 } else { 90 });
-    let bar = egui::Frame::NONE.fill(wash).stroke(Stroke::new(1.0, edge)).corner_radius(4.0).inner_margin(egui::Margin {
-        left: 8,
-        right: 8,
-        top: 4,
-        bottom: 4,
-    });
-    bar.show(ui, |ui| {
+    notice(hue, t).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 2.0);

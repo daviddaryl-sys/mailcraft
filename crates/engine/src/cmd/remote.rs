@@ -3550,6 +3550,14 @@ pub fn apply_categories(s: &mut Session, download: &CategoriesDownload) -> CmdRe
             }
         }
     }
+    // Outlook's list, by name, for its colours to win here (R3 spec S18).
+    if s.mailbox.account(download.account).is_some_and(|a| a.kind == mailcraft_model::AccountKind::Microsoft) {
+        let names: Vec<String> = download.categories.iter().map(|c| c.name.clone()).collect();
+        if s.mailbox.outlook_categories != names {
+            s.mailbox.outlook_categories = names;
+            changed += 1;
+        }
+    }
     if changed > 0 {
         s.mailbox_changed();
     }

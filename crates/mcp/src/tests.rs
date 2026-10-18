@@ -31,9 +31,16 @@ fn lifecycle_and_tools() {
     assert!(s.handle_line("{not json").unwrap().contains("parse error"));
 }
 
+/// A frame's text without the frame.
+fn plain(v: &Value) -> String {
+    v.as_str().unwrap_or("").replace(crate::tools::UNTRUSTED_OPEN, "").replace(crate::tools::UNTRUSTED_CLOSE, "")
+}
+
 #[test]
 fn agent_triages_mail_and_books_a_meeting() {
-    let mut s = Server::new(Box::new(Headless::default()));
+    // The owner allowed sending, and a mailbox of the agent's own.
+    let allow = vec![mailcraft_engine::agent::Class::Send, mailcraft_engine::agent::Class::Mailbox];
+    let mut s = Server::new(Box::new(Headless::new(mailcraft_engine::Session::empty(), allow)));
     tool(&mut s, "open_mailbox", json!({"sample": true}));
     let folders = tool(&mut s, "list_folders", json!({}));
     assert_eq!(folders["accounts"][0]["folders"][0]["name"], "Inbox");
@@ -54,7 +61,7 @@ fn agent_triages_mail_and_books_a_meeting() {
         ]}),
     );
     let events = tool(&mut s, "list_events", json!({"from": "2030-01-07", "to": "2030-01-07"}));
-    assert!(events["events"].as_array().unwrap().iter().any(|e| e["title"] == "Prepare the Atlas estimate"));
+    assert!(events["events"].as_array().unwrap().iter().any(|e| plain(&e["title"]) == "Prepare the Atlas estimate"));
     let tasks = tool(&mut s, "list_tasks", json!({"filter": "active"}));
     assert!(tasks["tasks"].as_array().unwrap().iter().any(|t| t["message"] == id));
     // Reply through the commands a person would use.
@@ -62,7 +69,7 @@ fn agent_triages_mail_and_books_a_meeting() {
     tool(&mut s, "execute", json!({"command": "compose.set", "params": {"body": "Thursday works. I'll bring a range."}}));
     let sent = tool(&mut s, "execute", json!({"command": "compose.send"}));
     let reply = tool(&mut s, "read_message", json!({"id": sent["id"]}));
-    assert_eq!(reply["subject"], "RE: Q4 roadmap review moved to Thursday");
+    assert_eq!(plain(&reply["subject"]), "RE: Q4 roadmap review moved to Thursday");
     assert!(tool(&mut s, "read_message", json!({"id": id}))["answered"].as_bool().unwrap());
     // A new message, and a bad one that leaves nothing open.
     tool(&mut s, "send_message", json!({"to": "maya@lumen.example", "subject": "Hello", "body": "Hi Maya"}));

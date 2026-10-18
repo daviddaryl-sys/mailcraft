@@ -12,7 +12,7 @@ fn a(name: &str, email: &str) -> Address {
 }
 
 fn file(name: &str, mime: &str, data: &[u8]) -> Attachment {
-    Attachment { name: name.into(), mime: mime.into(), content_id: String::new(), inline: false, data: Arc::new(data.to_vec()) }
+    Attachment { name: name.into(), mime: mime.into(), content_id: String::new(), inline: false, data: Arc::new(data.to_vec()), kept: None }
 }
 
 fn picture(name: &str, mime: &str, content_id: &str, data: &[u8]) -> Attachment {
@@ -326,6 +326,59 @@ fn a_foreign_message_survives_reading_writing_and_reading() {
 }
 
 #[test]
+fn central_european_mail_reads_without_boxes() {
+    // #178: windows-1250 and iso-8859-2 were read as UTF-8, and every letter past ASCII drew as a box.
+    let mut eml: Vec<u8> = [
+        "From: =?iso-8859-2?Q?=D0ur=F0ica_=AEu=BEi=E6?= <djurdjica@example.org>",
+        "To: =?windows-1250?B?SXZhbiBHdm+e8GFu?= <ivan@example.org>",
+        "Subject: =?windows-1250?Q?Introduction_=96_we=92ve_met,_Gvo=9E=F0e?=",
+        "Date: Tue, 1 Jul 2025 10:52:37 +0200",
+        "Message-ID: <cee@example.org>",
+        "MIME-Version: 1.0",
+        "Content-Type: multipart/mixed; boundary=\"outer\"",
+        "",
+        "--outer",
+        "Content-Type: multipart/alternative; boundary=\"alt\"",
+        "",
+        "--alt",
+        "Content-Type: text/plain; charset=windows-1250",
+        "Content-Transfer-Encoding: 8bit",
+        "",
+        "",
+    ]
+    .join("\r\n")
+    .into_bytes();
+    eml.extend_from_slice(b"we\x92ve sent the Gvo\x9E\xF0e \x96 \x8E\x9A\xE8 notes.\r\n");
+    eml.extend_from_slice(
+        [
+            "--alt",
+            "Content-Type: text/html; charset=\"ISO-8859-2\"",
+            "Content-Transfer-Encoding: quoted-printable",
+            "",
+            "<p>Gvo=BE=F0e =B9=E8</p>",
+            "--alt--",
+            "--outer",
+            "Content-Type: application/pdf",
+            "Content-Disposition: attachment; filename*=iso-8859-2''Gvo%BE%F0e.pdf",
+            "Content-Transfer-Encoding: base64",
+            "",
+            "JVBERi0xLjQK",
+            "--outer--",
+            "",
+        ]
+        .join("\r\n")
+        .as_bytes(),
+    );
+    let m = parse(&eml);
+    assert_eq!(m.from, a("Đurđica Žužić", "djurdjica@example.org"));
+    assert_eq!(m.to, [a("Ivan Gvožđan", "ivan@example.org")]);
+    assert_eq!(m.subject, "Introduction – we’ve met, Gvožđe");
+    assert_eq!(m.body.text, "we’ve sent the Gvožđe – Žšč notes.");
+    assert_eq!(m.body.html.as_deref(), Some("<p>Gvožđe šč</p>"));
+    assert_eq!(m.attachments[0].name, "Gvožđe.pdf");
+}
+
+#[test]
 fn large_and_hostile_input_is_read_quickly() {
     // Megabytes of lines, of header-like lines, of delimiters and of nesting.
     let _ = parse(&b"just a line of text\r\n".repeat(100_000));
@@ -408,6 +461,7 @@ fn attachment() -> impl Strategy<Value = Attachment> {
         content_id,
         inline,
         data: Arc::new(data),
+        kept: None,
     })
 }
 
@@ -466,6 +520,14 @@ fn message() -> impl Strategy<Value = Message> {
             flag_due: Some(1),
             synced: Some(mailcraft_model::sync::RemoteFlags { uid: 11, read: true, ..Default::default() }),
             server: Some(mailcraft_model::sync::ServerMessage { id: "AAMkAGI2-not-carried".into(), ..Default::default() }),
+            unfetched: false,
+            attachments_on_server: false,
+            moving_out: None,
+            incomplete: false,
+            server_draft: None,
+            held: String::new(),
+            answers: None,
+            kept: None,
         },
     )
 }

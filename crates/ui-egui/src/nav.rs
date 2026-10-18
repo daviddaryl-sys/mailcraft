@@ -226,6 +226,8 @@ fn picked_in_list(ui: &Ui) -> bool {
 /// A folder's row, `selected` when it is the one the folder in view is highlighted in. `key` tells
 /// the Favorites' rows (`fav`) from the accounts' (`tree`).
 fn folder_row(app: &mut MailApp, ui: &mut Ui, f: &Folder, depth: usize, has_children: bool, key: &str, count: Count, selected: bool) {
+    // Under Favorites a shared mailbox's folder says whose it is (#70); in its tree, its name.
+    let name = if key == "fav" { folder_label(&app.session.mailbox, f) } else { f.name.clone() };
     let t = Tokens::get(ui.ctx());
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
     let resp = ui.interact(r, ui.id().with((key, f.id)), Sense::click());
@@ -257,7 +259,7 @@ fn folder_row(app: &mut MailApp, ui: &mut Ui, f: &Folder, depth: usize, has_chil
         name_end = shown.min.x - 8.0;
     }
     let font = if selected { bold(NAME_SIZE) } else { regular(NAME_SIZE) };
-    paint_clipped(ui.painter(), pos2(x + NAME_LEFT, y), (name_end - x - NAME_LEFT).max(0.0), &f.name, font, t.text);
+    paint_clipped(ui.painter(), pos2(x + NAME_LEFT, y), (name_end - x - NAME_LEFT).max(0.0), &name, font, t.text);
     if resp.clicked() {
         ui.data_mut(|d| d.insert_temp(egui::Id::new("folder_picked_in_list"), key == "tree"));
         let _ = app.run("folder.select", json!({"id": f.id}));
@@ -496,14 +498,15 @@ pub fn folder_pane(app: &mut MailApp, ui: &mut Ui) {
                 mailcraft_engine::cmd::folder::favorites(&app.session).into_iter().filter_map(|id| app.session.mailbox.folder(id).cloned()).collect();
             // And what there is to say of Outlook's, in one quiet line under the heading.
             let note = app.favorites_note();
+            // (A shared mailbox right after the account it is opened through, #70.)
             let lists: Vec<(Id, String, Vec<(Folder, usize, bool)>)> = app
                 .session
                 .mailbox
-                .accounts
-                .iter()
+                .accounts_in_order()
+                .into_iter()
                 .map(|a| {
                     let rows = if folded.contains(&a.id) { Vec::new() } else { visible(&app.session.mailbox, &folded, a.id) };
-                    (a.id, a.name.clone(), rows)
+                    (a.id, heading_name(app, a), rows)
                 })
                 .collect();
             // The folder in view is highlighted once: under Favorites when it shows there, unless
@@ -542,6 +545,21 @@ pub fn folder_pane(app: &mut MailApp, ui: &mut Ui) {
         });
     });
     app.ui.folder_pane_width = shown.response.rect.width();
+}
+
+/// What a folder is called where it is listed away from its own account's tree (under Favorites,
+/// in the bar over a search's results): its name, and for a folder of a shared mailbox the
+/// mailbox it is in, so that its Inbox is never taken for the owner's (#70).
+pub(crate) fn folder_label(mb: &Mailbox, f: &Folder) -> String {
+    let Some(a) = mb.account(f.account).filter(|a| a.is_shared()) else { return f.name.clone() };
+    let mailbox = if a.name.trim().is_empty() { a.email.trim() } else { a.name.trim() };
+    crate::i18n::fmt(tl!("{folder} - {mailbox}"), &[("folder", &f.name), ("mailbox", mailbox)])
+}
+
+/// What an account's heading in the folder pane says: its name, and for a shared mailbox
+/// Microsoft won't open for the owner, No access (#70; the mail already here stays readable).
+pub(crate) fn heading_name(app: &MailApp, a: &mailcraft_model::Account) -> String {
+    if app.shared_refused.contains_key(&a.id) { format!("{} · {}", a.name, tl!("No access")) } else { a.name.clone() }
 }
 
 #[cfg(test)]

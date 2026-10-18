@@ -53,6 +53,12 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("mail.junk", "Block Sender", "Home › Delete", junk).params(IDS).selection(needs_message),
         CommandSpec::new("mail.notJunk", "Not Junk", "Home › Delete", not_junk).key("Mod+Alt+J").params(IDS).selection(needs_message),
         CommandSpec::new("mail.findRelated", "Find Related Messages", "Home › Find", find_related).pure().selection(needs_message),
+        CommandSpec::new("mail.openAttachment", "Open Attachment", "Attachments › Actions", open_attachment)
+            .pure()
+            .params(
+                r#"{"index": number, "id"?: number} — opens the file with the computer's own program for it, in the MailCraft window only (never for an agent). Programs, scripts, shortcuts, installers and disk images are refused: save them instead. Anywhere else answers why it opened nothing"#,
+            )
+            .selection(needs_message),
         CommandSpec::new("mail.saveAttachment", "Save Attachment", "Attachments › Actions", save_attachment)
             .pure()
             .params(r#"{"index": number, "id"?: number, "path"?: string} — without a path, answers the bytes as base64 `data`"#)
@@ -163,6 +169,12 @@ fn previous(s: &mut Session, _: &Value) -> CmdResult {
 
 fn get(s: &mut Session, v: &Value) -> CmdResult {
     let id = p::id(v, "id").or(s.sel.focus()).ok_or_else(|| fail("select a message first"))?;
+    if s.mailbox.message(id).is_none() {
+        return Err(fail(format!("no message with id {id}")));
+    }
+    // Its text, from where the mailbox keeps it when it isn't in memory (a text that can't be
+    // read says so in its place).
+    let _ = s.load_where(id, |_| false);
     let m = s.mailbox.message(id).ok_or_else(|| fail(format!("no message with id {id}")))?;
     Ok(message_json(s, m))
 }
@@ -261,7 +273,7 @@ fn copy_to(s: &mut Session, v: &Value) -> CmdResult {
     let ids = targets(s, v)?;
     let mut copies = Vec::new();
     for id in &ids {
-        copies.push(s.mailbox.copy_message(*id, folder)?);
+        copies.push(s.mailbox.copy_message_marked(*id, folder, u64::try_from(s.now()).unwrap_or_default())?);
     }
     Ok(json!({"copies": copies, "folder": folder}))
 }
@@ -403,7 +415,20 @@ fn save_attachment(s: &mut Session, v: &Value) -> CmdResult {
         Some((stem, ext)) if !ext.is_empty() && ext.len() <= 8 && ext.chars().all(char::is_alphanumeric) => (stem, ext),
         _ => (a.name.as_str(), "bin"),
     };
-    deliver(v, &file_name(stem, ext), a.data.as_ref().clone())
+    // The file's bytes, from where the mailbox keeps them when they aren't in memory.
+    let bytes = s.content(id, crate::Part::Attachment(index))?;
+    deliver(v, &file_name(stem, ext), bytes.as_ref().clone())
+}
+
+/// The window opens attachments (through its host); everywhere else this says why nothing was
+/// opened: refused for a program or a script, or not the place for it.
+fn open_attachment(s: &mut Session, v: &Value) -> CmdResult {
+    let (id, index) = attachment_target(s, v)?;
+    let name = s.mailbox.message(id).and_then(|m| m.attachments.get(index)).map(|a| a.name.clone()).ok_or_else(|| fail("no such attachment"))?;
+    Err(match crate::opening::verdict(&name) {
+        crate::opening::Verdict::Blocked => fail(crate::opening::blocked_message(&name)),
+        _ => crate::CmdError::Disabled("attachments are opened in the MailCraft window; `mail.saveAttachment` gives the file".into()),
+    })
 }
 
 fn remove_attachment(s: &mut Session, v: &Value) -> CmdResult {

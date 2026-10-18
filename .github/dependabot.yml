@@ -1,0 +1,16 @@
+# Dependabot keeps the pinned GitHub Actions current: every third-party `uses:` in
+# .github/workflows is a full commit SHA with its tag as a comment, and Dependabot moves both.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # A new release waits a week before it is proposed, so a compromised one has time to be noticed.
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"

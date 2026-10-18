@@ -6,7 +6,7 @@ use mailcraft_model::{Contact, Labeled, PostalAddress};
 use mailcraft_time::Date;
 
 use crate::lines::{ContentLine, Lines};
-use crate::text::{base64_bytes, component, decode, multi, quoted_printable, single, split, unescape};
+use crate::text::{base64_bytes, component, multi, quoted_printable, single, split, unescape};
 
 /// Most cards read from one text.
 const MAX_CARDS: usize = 100_000;
@@ -28,6 +28,8 @@ const MAX_DEPTH: usize = 8;
 ///
 /// Work is bounded: at most 100 000 cards are read, 100 e-mail addresses, phone numbers, postal
 /// addresses and web sites per card, and what a line holds beyond 1 MiB is dropped.
+///
+/// A file's bytes go through [`parse_bytes`], which reads raw 8-bit values in their `CHARSET`.
 pub fn parse(text: &str) -> Vec<Contact> {
     let mut lines = Lines::new(text);
     // The cards that are open, outermost first, and the finished ones with the order they began in.
@@ -61,6 +63,13 @@ pub fn parse(text: &str) -> Vec<Contact> {
     }
     done.sort_by_key(|(order, _)| *order);
     done.into_iter().map(|(_, contact)| contact).take(MAX_CARDS).collect()
+}
+
+/// Parse a vCard file as [`parse`] does, from its bytes: a value written as raw 8-bit bytes
+/// (vCard 2.1, `FN;CHARSET=WINDOWS-1250:…`) is read in the `CHARSET` of its property, and one
+/// without a `CHARSET` as UTF-8 when it is valid UTF-8, else as Windows-1252.
+pub fn parse_bytes(bytes: &[u8]) -> Vec<Contact> {
+    parse(&crate::lines::text_from_bytes(bytes))
 }
 
 /// A card being read.
@@ -192,7 +201,7 @@ fn decoded(line: &ContentLine) -> String {
         "BASE64" | "B" => base64_bytes(&line.value),
         _ => return line.value.clone(),
     };
-    decode(bytes, line.param("CHARSET").unwrap_or(""))
+    mailcraft_charset::decode(&bytes, line.param("CHARSET").unwrap_or(""))
 }
 
 /// `tel:+1-555-0100` and `mailto:a@example.org` (vCard 4.0 URIs) without the scheme.
@@ -567,6 +576,74 @@ ADR;TYPE=dom,postal,parcel:;;1 Main St;Riverton\nitem2.ADR:;;2 Side St\nitem2.X-
         assert_eq!(card("FN;CHARSET=windows-1252;ENCODING=QUOTED-PRINTABLE:Zo=EB =96 caf=E9").display_name, "Zoë – café");
         assert_eq!(card("FN;QUOTED-PRINTABLE:Zo=EB").display_name, "Zoë");
         assert_eq!(card("FN;QUOTED-PRINTABLE:Zo=C3=AB").display_name, "Zoë");
+    }
+
+    #[test]
+    fn central_european_charsets() {
+        // #180: a 2.1 card from a Central European phone or mail program, in Windows-1250 and in
+        // ISO-8859-2, was read as Windows-1252 or UTF-8.
+        let cards = parse(
+            "BEGIN:VCARD\r\n\
+VERSION:2.1\r\n\
+N;CHARSET=windows-1250;ENCODING=QUOTED-PRINTABLE:=8Eagar;=D0ur=F0ica;;;\r\n\
+FN;CHARSET=windows-1250;ENCODING=QUOTED-PRINTABLE:=D0ur=F0ica =8Eagar\r\n\
+ORG;CHARSET=windows-1250;ENCODING=QUOTED-PRINTABLE:Gvo=9E=F0e d.o.o.\r\n\
+NOTE;CHARSET=windows-1250;ENCODING=QUOTED-PRINTABLE:We=92ve met =96 twice, in =8Aibenik =\r\n\
+and =C8akovec.\r\n\
+EMAIL;INTERNET:durdica@example.org\r\n\
+END:VCARD\r\n\
+BEGIN:VCARD\r\n\
+VERSION:2.1\r\n\
+N;CHARSET=ISO-8859-2;ENCODING=QUOTED-PRINTABLE:Kova=E8i=E6;=AEeljko;;;\r\n\
+FN;CHARSET=ISO-8859-2;ENCODING=QUOTED-PRINTABLE:=AEeljko Kova=E8i=E6\r\n\
+TITLE;CHARSET=iso-8859-2;ENCODING=QUOTED-PRINTABLE:Gvo=BE=F0e i =B9ljunak\r\n\
+EMAIL;INTERNET:zeljko@example.org\r\n\
+END:VCARD\r\n",
+        );
+        assert_eq!(cards.len(), 2);
+        let (first, second) = (&cards[0], &cards[1]);
+        assert_eq!((first.display_name.as_str(), first.first.as_str(), first.last.as_str()), ("Đurđica Žagar", "Đurđica", "Žagar"));
+        assert_eq!(first.company, "Gvožđe d.o.o.");
+        assert_eq!(first.notes, "We’ve met – twice, in Šibenik and Čakovec.");
+        assert_eq!((second.display_name.as_str(), second.first.as_str(), second.last.as_str()), ("Željko Kovačić", "Željko", "Kovačić"));
+        assert_eq!(second.title, "Gvožđe i šljunak");
+        // A set no standard names is read as UTF-8, as mail is.
+        assert_eq!(card("FN;CHARSET=x-unknown;ENCODING=QUOTED-PRINTABLE:Zo=C3=AB").display_name, "Zoë");
+    }
+
+    #[test]
+    fn raw_8_bit_values_are_read_in_their_charset() {
+        // #185: raw Windows-1250 bytes (not quoted-printable) were read as UTF-8 before the charset
+        // was looked at, and đ ć č Š became U+FFFD.
+        let cards = parse_bytes(
+            b"BEGIN:VCARD\r\nVERSION:2.1\r\n\
+N;CHARSET=WINDOWS-1250:Gvo\xf0\xe6i\xe8;Ivana;;;\r\n\
+FN;CHARSET=WINDOWS-1250:Ivana Gvo\xf0\xe6i\xe8\r\n\
+ORG;CHARSET=WINDOWS-1250:\x8akola \xe8e\x9a\xe6e\r\n\
+NOTE;CHARSET=\"iso-8859-2\":Gvo\xbe\xf0e\r\n \xae\xb9\xe8\xe6\r\n\
+TITLE;CHARSET=windows-1250;ENCODING=QUOTED-PRINTABLE:=8Aef\r\n\
+X-SOMETHING:\xff\r\n\
+EMAIL;INTERNET:ivana@example.org\r\n\
+END:VCARD\r\n",
+        );
+        assert_eq!(cards.len(), 1);
+        let c = &cards[0];
+        assert_eq!((c.display_name.as_str(), c.last.as_str(), c.first.as_str()), ("Ivana Gvođćič", "Gvođćič", "Ivana"));
+        assert_eq!(c.company, "Škola češće");
+        // A folded line goes on in the charset of the property it continues (2.1 keeps the space).
+        assert_eq!(c.notes, "Gvožđe Žščć");
+        assert_eq!(c.title, "Šef");
+        assert_eq!(c.emails[0].value, "ivana@example.org");
+        // Without a charset: UTF-8 when it is UTF-8, else Windows-1252; in UTF-8 nothing changes.
+        assert_eq!(parse_bytes(b"BEGIN:VCARD\nFN:Zo\xc3\xab\nEND:VCARD")[0].display_name, "Zoë");
+        assert_eq!(parse_bytes(b"BEGIN:VCARD\nFN:Zo\xeb \x96 caf\xe9\nEND:VCARD")[0].display_name, "Zoë – café");
+        assert_eq!(parse_bytes("\u{feff}BEGIN:VCARD\r\nFN;CHARSET=UTF-8:Đurđica\r\nEND:VCARD".as_bytes())[0].display_name, "Đurđica");
+        // A file in UTF-16 with its byte order mark.
+        let utf16: Vec<u8> = "\u{feff}BEGIN:VCARD\r\nFN:Željko\r\nEND:VCARD\r\n".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(parse_bytes(&utf16)[0].display_name, "Željko");
+        // Bytes and text give the same cards.
+        let text = crate::write(&cards.iter().collect::<Vec<_>>());
+        assert_eq!(parse_bytes(text.as_bytes()), parse(&text));
     }
 
     #[test]

@@ -27,6 +27,13 @@ pub const NEWSLETTER: &str = include_str!("../corpus/newsletter.html");
 /// part that is nothing but slices of one picture, `srcset`, and three tracking pixels.
 pub const BUILT_NEWSLETTER: &str = include_str!("../corpus/built_newsletter.html");
 
+/// A directory's weekly digest, the way a notification service writes one: a 600-pixel table
+/// centred three ways (`<center>`, `align`, a centred cell), a grid of four tiles whose number
+/// and icon stand side by side, written four ways (a table each way round, a picture in a line of
+/// text, a paragraph), a two-column table whose long cells must wrap at the widths it gives, a
+/// button, and a footer of small linked pictures side by side (a row of cells, then a line).
+pub const ACCESS_DIGEST: &str = include_str!("../corpus/access_digest.html");
+
 /// An order confirmation: a grid of order facts, and a data table with a header row, right-aligned
 /// amounts, spanning total rows and lines under the rows.
 pub const RECEIPT: &str = include_str!("../corpus/receipt.html");
@@ -83,6 +90,7 @@ pub fn messages() -> Vec<(&'static str, &'static str)> {
         ("screenshots", SCREENSHOTS),
         ("calendar notice", CALENDAR),
         ("built newsletter", BUILT_NEWSLETTER),
+        ("access digest", ACCESS_DIGEST),
     ]
 }
 

@@ -9,18 +9,16 @@ use super::*;
 
 const ACCOUNT_EMAIL: &str = "owner@example.org";
 
-/// A session with one Microsoft account kept in step through Graph, as the switch for testing
-/// allows; its id.
+/// A session with one Microsoft account kept in step through Graph; its id.
 fn session() -> (Session, Id) {
     let mut s = Session::empty();
-    s.graph_mail = true;
     let added = s.run("account.add", &json!({"email": ACCOUNT_EMAIL, "kind": "microsoft"})).unwrap();
     let account = added["id"].as_u64().unwrap();
     (s, account)
 }
 
 fn folder(id: &str, parent: &str, name: &str, kind: FolderKind) -> GraphFolder {
-    GraphFolder { id: id.into(), parent: parent.into(), name: name.into(), kind }
+    GraphFolder { id: id.into(), parent: parent.into(), name: name.into(), kind, ..Default::default() }
 }
 
 /// What the server has to begin with: the special folders, and a few of the owner's.
@@ -54,11 +52,9 @@ fn by_server<'s>(s: &'s Session, account: Id, id: &str) -> &'s Folder {
 }
 
 #[test]
-fn an_account_kept_in_step_through_graph_is_made_only_behind_the_switch() {
+fn an_account_kept_in_step_through_graph_is_made_when_asked_for() {
     let mut s = Session::empty();
-    let refused = s.run("account.add", &json!({"email": ACCOUNT_EMAIL, "kind": "microsoft"})).unwrap_err();
-    assert!(refused.to_string().contains("MAILCRAFT_GRAPH_MAIL=1"), "{refused}");
-    // Without the switch an account is what it always was.
+    // An account that names its mail servers is what it always was.
     let imap = s
         .run(
             "account.add",
@@ -205,8 +201,8 @@ fn what_is_changed_here_goes_up_as_the_difference_from_the_server() {
     assert_eq!(s.mailbox.folder(under).unwrap().parent, Some(made));
     assert_eq!(s.mailbox.folder(sales).unwrap().parent, None);
     assert_ne!(s.mailbox.folder(sales).unwrap().parent, Some(inbox));
-    // Undo can't take back what the server has now (until R3.5): the history went.
-    assert!(s.run("edit.undo", &json!({})).is_err());
+    // The history stays (R3.5): undoing is another change, sent with the next run.
+    assert!(s.can_undo());
 
     // Deleted for good from Deleted Items: the server deletes it too, from the queue.
     s.run("folder.delete", &json!({"id": ab})).unwrap();

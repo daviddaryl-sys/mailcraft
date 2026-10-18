@@ -82,6 +82,7 @@ use mailcraft_model::remote::{
     EventsDownload, EventsUpload, EventsUploaded, FreeBusy, FreeBusyAsk, MAX_BUSY, MAX_CONTACTS, MAX_EVENT_OPS, MAX_EVENTS, MAX_REMOTE_CALENDARS,
     MAX_REMOTE_CATEGORIES, MAX_SCHEDULE_STRETCH, MAX_SCHEDULES, PersonSchedule, RemoteCalendar, RemoteContact, RemoteEvent, RemoteEventKind,
 };
+use mailcraft_model::sync::SharedRefusal;
 use mailcraft_model::{
     Address, Attendee, Category, Freq, Importance, Labeled, Message, OnlineMeeting, OnlineProvider, PostalAddress, Recurrence, Response,
     ResponseOptions, Rgb, ShowAs,
@@ -306,6 +307,22 @@ enum Doing {
     Categories,
     Favorites,
     Folders,
+    Mail,
+}
+
+impl Doing {
+    /// One word for a log line.
+    fn word(self) -> &'static str {
+        match self {
+            Doing::Sending => "sending",
+            Doing::Calendar | Doing::Writing => "calendar",
+            Doing::Contacts => "contacts",
+            Doing::Categories => "categories",
+            Doing::Favorites => "favorites",
+            Doing::Folders => "folders",
+            Doing::Mail => "mail",
+        }
+    }
 }
 
 fn nonsense(text: &str) -> NetError {
@@ -321,6 +338,20 @@ struct Graph<'a> {
     /// The ground rules of a mailbox's mail ([`pace`]): its gate, who is waiting, and how a
     /// request is asked again. `None`: one try, as it always was.
     pace: Option<Pace>,
+    /// Whose mailbox the mail is asked of: `/me`, the owner of the token; or `/users/{address}`,
+    /// a shared mailbox the owner may open (#70, [`Graph::of_shared`]).
+    mailbox: String,
+}
+
+/// What stands in an address of Graph's for a shared mailbox (#70): `/users/{address}`, the
+/// address checked to be a plain one first ([`mailcraft_model::mailbox_address`]), so that it
+/// names that mailbox and nothing else. Its `@` stays as it is (a path may have one), and
+/// anything of the local part that isn't a letter, a digit or `-._~` is written as `%XX`.
+pub(crate) fn shared_mailbox_path(address: &str) -> Result<String, NetError> {
+    let refused = || NetError::Proto(ProtoError::Protocol("that isn't an address a shared mailbox can be opened at".into()));
+    let address = mailcraft_model::mailbox_address(address).ok_or_else(refused)?;
+    let (local, domain) = address.split_once('@').ok_or_else(refused)?;
+    Ok(format!("/users/{}@{}", http::encode(local), http::encode(domain)))
 }
 
 /// What [`Graph::call`] goes by.
@@ -328,6 +359,20 @@ struct Pace {
     gate: std::sync::Arc<pace::Gate>,
     priority: pace::Priority,
     retry: pace::Retry,
+}
+
+/// Why a shared mailbox won't be opened, when an answer of Graph's says so by its own code (#70):
+/// a 403 `ErrorAccessDenied`, a 404 `ErrorInvalidUser`, or `MailboxNotEnabledForRESTAPI` (and
+/// its twin `MailboxNotSupportedForRESTAPI`). Any other code (a quota, a consent, a folder that
+/// isn't there) is none of these.
+pub(crate) fn shared_refusal(status: u64, body: &Value) -> Option<SharedRefusal> {
+    let code = body.get("error").and_then(|error| error.get("code")).and_then(Value::as_str).unwrap_or("");
+    match (status, code) {
+        (_, "MailboxNotEnabledForRESTAPI" | "MailboxNotSupportedForRESTAPI") => Some(SharedRefusal::NotThroughGraph),
+        (403, "ErrorAccessDenied") => Some(SharedRefusal::NoAccess),
+        (404, "ErrorInvalidUser") => Some(SharedRefusal::NoMailbox),
+        _ => None,
+    }
 }
 
 /// What `Prefer` asks for of the ids in every answer to the Graph code of mail.
@@ -345,7 +390,7 @@ impl<'a> Graph<'a> {
         if token.is_empty() || token.len() > MAX_TOKEN || !token.bytes().all(|b| b.is_ascii_graphic()) {
             return Err(NetError::Proto(ProtoError::Auth("there is no sign-in to show Microsoft Graph".into())));
         }
-        Ok(Graph { base: Url::parse(base)?, token, immutable: false, pace: None })
+        Ok(Graph { base: Url::parse(base)?, token, immutable: false, pace: None, mailbox: "/me".into() })
     }
 
     /// Graph for a Microsoft account's mail (R3): every request asks for immutable ids, goes
@@ -404,6 +449,31 @@ impl<'a> Graph<'a> {
         }
     }
 
+    /// The same Graph, asking for the mail of the shared mailbox at `address` instead of the
+    /// owner's own, when there is one (#70): `/users/{address}/…` for `/me/…`.
+    fn of_shared(self, address: Option<&str>) -> Result<Graph<'a>, NetError> {
+        match address {
+            None => Ok(self),
+            Some(address) => Ok(Graph { mailbox: shared_mailbox_path(address)?, ..self }),
+        }
+    }
+
+    /// Whether the mail asked for is a shared mailbox's.
+    fn shared(&self) -> bool {
+        self.mailbox != "/me"
+    }
+
+    /// `rest` of the mailbox the mail is asked of, as a path of Graph v1.0: `/v1.0/me{rest}`, or
+    /// `/v1.0/users/{address}{rest}` for a shared mailbox.
+    fn mail_path(&self, rest: &str) -> String {
+        format!("/v1.0{}{rest}", self.mailbox)
+    }
+
+    /// The same, as a request of a `$batch` names it (without the version).
+    fn batch_path(&self, rest: &str) -> String {
+        format!("{}{rest}", self.mailbox)
+    }
+
     /// `path` (with its query) on Graph.
     fn url(&self, path: &str) -> Url {
         Url { path: path.to_string(), ..self.base.clone() }
@@ -431,12 +501,53 @@ impl<'a> Graph<'a> {
         } else {
             headers.extend_from_slice(more);
         }
-        http::request(url, &Request { method, headers: &headers, body, patience, max_body }).map_err(|e| e.without(self.token))
+        http::request(url, &Request { method, headers: &headers, body: body.map(str::as_bytes), patience, max_body })
+            .map_err(|e| e.without(self.token))
+    }
+
+    /// `PUT` a piece of a large attachment to the address an upload session gave (R3.4.1): through
+    /// the mailbox's gate, and with no `Authorization`, as the address is its own permission (and
+    /// the token goes to Graph alone). A piece is asked again only when the server said it was
+    /// busy: one whose answer was lost may have been taken, and the next run starts the upload
+    /// afresh, looking first whether the attachment is there.
+    fn upload(&self, url: &Url, range: &str, piece: &[u8]) -> Result<Reply, NetError> {
+        let headers = [("Content-Type", "application/octet-stream"), ("Content-Range", range)];
+        let ask = || http::request(url, &Request { method: "PUT", headers: &headers, body: Some(piece), patience: SEND_TIMEOUT, max_body: MAX_PAGE });
+        let Some(pace) = &self.pace else { return ask() };
+        let mut tries = 0u32;
+        loop {
+            tries = tries.saturating_add(1);
+            let permit = pace.gate.enter(pace.priority, pace.retry.longest_wait)?;
+            let asked = ask();
+            drop(permit);
+            match asked {
+                Ok(reply) if matches!(reply.status, 429 | 503) => {
+                    let wait = pace.retry.wait_before(tries.saturating_add(1), wait_of(reply.retry_after.as_deref(), mailcraft_time::now()));
+                    pace.gate.pause(wait);
+                    if tries >= pace.retry.tries || wait > pace.retry.longest_wait {
+                        return Ok(reply);
+                    }
+                }
+                other => return other,
+            }
+        }
     }
 
     /// The error for an answer that isn't the one hoped for. `sent` is what went to Graph besides
     /// the token: none of it may come back in the error.
     fn refusal(&self, doing: Doing, reply: &Reply, sent: &str) -> NetError {
+        // The mail's refusals are logged by status and Graph's code alone, never its message.
+        if matches!(doing, Doing::Folders | Doing::Mail) {
+            let code = logged_code(&reply.body, &[self.token, sent]);
+            log::info!("graph {}: Microsoft Graph refused a request (status {}{code})", doing.word(), reply.status);
+        }
+        // A shared mailbox that won't let the owner in says so by Graph's code (#70).
+        if self.shared() && matches!(doing, Doing::Folders | Doing::Mail) {
+            let body = serde_json::from_slice::<Value>(&reply.body).unwrap_or(Value::Null);
+            if let Some(why) = shared_refusal(u64::from(reply.status), &body) {
+                return NetError::SharedRefused(why);
+            }
+        }
         refusal(doing, reply, &[self.token, sent], mailcraft_time::now())
     }
 
@@ -500,10 +611,21 @@ fn page_of(body: &[u8]) -> Result<Page, NetError> {
 /// place isn't a name, or repeats what was `sent`: a careless server could write the token or
 /// the mail back there. The message that comes with the name is never shown.
 fn code_of(body: &[u8], sent: &[&str]) -> String {
+    code_name(body, sent).map(|code| format!(" ({code})")).unwrap_or_default()
+}
+
+/// The same name as a log line carries it: `, code=ErrorInvalidRequest` (the form Copy
+/// Diagnostics keeps whole), or nothing.
+fn logged_code(body: &[u8], sent: &[&str]) -> String {
+    code_name(body, sent).map(|code| format!(", code={code}")).unwrap_or_default()
+}
+
+/// The name of [`code_of`], when there is one that may be shown.
+fn code_name(body: &[u8], sent: &[&str]) -> Option<String> {
     let json = serde_json::from_slice::<Value>(body).ok();
     let code = json.as_ref().and_then(|json| json.get("error")).and_then(|error| error.get("code")).and_then(Value::as_str).unwrap_or("");
     let named = !code.is_empty() && code.len() <= MAX_CODE && code.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.'));
-    if named && !sent.iter().any(|sent| repeats(code, sent)) { format!(" ({code})") } else { String::new() }
+    (named && !sent.iter().any(|sent| repeats(code, sent))).then(|| code.to_string())
 }
 
 /// Whether `code` (ASCII) repeats something of `sent`: it is a piece of it, or it has a run of
@@ -541,6 +663,7 @@ fn refusal(doing: Doing, reply: &Reply, sent: &[&str], now: Timestamp) -> NetErr
                 Doing::Categories => "this account may not read its list of categories through Microsoft Graph",
                 Doing::Favorites => "this account may not read its Favorites through Microsoft Graph",
                 Doing::Folders => "this account may not read or change its folders through Microsoft Graph",
+                Doing::Mail => "this account may not read its mail through Microsoft Graph",
             };
             NetError::Forbidden(format!("{what}{}", code()))
         }
@@ -566,6 +689,19 @@ fn is_address(email: &str) -> bool {
 
 /// [`send`] through Graph at `base`.
 fn send_at(base: &str, token: &str, message: &Message, options: &SendOptions) -> Result<(), NetError> {
+    let body = mime_body_with(message, options)?;
+    let graph = Graph::at(base, token)?;
+    let reply = graph.ask(&graph.url(SEND_MAIL), "POST", &[("Content-Type", "text/plain")], Some(&body), SEND_TIMEOUT, http::MAX_BODY)?;
+    if reply.status == 202 { Ok(()) } else { Err(graph.refusal(Doing::Sending, &reply, &body)) }
+}
+
+/// What `sendMail` is handed for `message`: its MIME, with its Bcc, in base64, after the checks
+/// every message goes through (someone to send it to, every address one).
+fn mime_body(message: &Message) -> Result<String, NetError> {
+    mime_body_with(message, &SendOptions::default())
+}
+
+fn mime_body_with(message: &Message, options: &SendOptions) -> Result<String, NetError> {
     // Leaving someone out silently would be worse than not sending.
     let mut anyone = false;
     for address in message.recipients() {
@@ -582,7 +718,6 @@ fn send_at(base: &str, token: &str, message: &Message, options: &SendOptions) ->
     if !anyone {
         return Err(NetError::Config("the message has no recipients".into()));
     }
-    let graph = Graph::at(base, token)?;
     // A message that was never dated is dated now, as it is for SMTP.
     let message = if message.date == 0 { Cow::Owned(Message { date: mailcraft_time::now(), ..message.clone() }) } else { Cow::Borrowed(message) };
     let offset_minutes = options.offset_minutes.unwrap_or_else(|| mailcraft_time::local_offset_minutes(message.date));
@@ -591,10 +726,7 @@ fn send_at(base: &str, token: &str, message: &Message, options: &SendOptions) ->
     if mime.len() > MAX_MESSAGE {
         return Err(NetError::Config("the message is too large to send through Microsoft Graph".into()));
     }
-    let body = STANDARD.encode(&mime);
-    drop(mime);
-    let reply = graph.ask(&graph.url(SEND_MAIL), "POST", &[("Content-Type", "text/plain")], Some(&body), SEND_TIMEOUT, http::MAX_BODY)?;
-    if reply.status == 202 { Ok(()) } else { Err(graph.refusal(Doing::Sending, &reply, &body)) }
+    Ok(STANDARD.encode(&mime))
 }
 
 /// [`events`] from Graph at `base`.
@@ -1807,7 +1939,7 @@ pub use favorites::favorites;
 pub mod pace;
 
 pub mod mail;
-pub use mail::sync_folders;
+pub use mail::{fetch_messages, search_messages, sync_folders, sync_mail};
 
 mod check;
 pub use check::{CHECK_TITLE, CalendarCheck, CheckStep, STEPS as CHECK_STEPS, check_calendar, check_start, no_sign_in};

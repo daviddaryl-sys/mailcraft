@@ -12,7 +12,7 @@ use mailcraft_model::{FolderKind, Id, Mailbox, Message};
 use mailcraft_net::graph::standin::{StandIn, TOKEN};
 use serde_json::{Value, json};
 
-/// A session with one Microsoft account kept in step through Graph (the switch for testing on),
+/// A session with one Microsoft account kept in step through Graph,
 /// and a stand-in for its server. Each test has a mailbox address of its own: the gate that
 /// counts a mailbox's requests is the process's.
 struct Rig {
@@ -25,7 +25,6 @@ impl Rig {
     fn new(address: &str) -> Rig {
         let server = StandIn::start().unwrap();
         let mut s = Session::at(Mailbox::with_local_account("", ""), 1_800_000_000, 0);
-        s.graph_mail = true;
         let account = s.run("account.add", &json!({"email": address, "kind": "microsoft"})).unwrap()["id"].as_u64().unwrap();
         Rig { server, s, account }
     }

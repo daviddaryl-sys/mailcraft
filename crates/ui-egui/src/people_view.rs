@@ -1015,6 +1015,30 @@ mod tests {
     }
 
     #[test]
+    fn the_contact_forms_delete_asks_first() {
+        // #186: Delete in a contact's form gives way to the question, and only its answer deletes.
+        let mut w = testing::window("view.people");
+        let id = people::sorted(&w.state().session, "")[0];
+        w.state_mut().run("people.select", serde_json::json!({"id": id})).unwrap();
+        w.run_steps(2);
+        testing::key(&mut w, egui::Key::Enter);
+        assert_eq!(testing::dialog(&w), Some("editContact"));
+        use egui_kittest::kittest::Queryable;
+        let press = |w: &mut egui_kittest::Harness<'_, MailApp>| {
+            // (A window that has just opened finds its place first.)
+            w.run_steps(5);
+            let pos = w.query_all_by_label("Delete").last().expect("a Delete button").rect().center();
+            testing::click(w, pos, egui::PointerButton::Primary, 1);
+        };
+        press(&mut w);
+        assert_eq!(testing::dialog(&w), Some("confirm"));
+        assert!(w.state().session.mailbox.contact(id).is_some());
+        press(&mut w);
+        assert_eq!(testing::dialog(&w), None);
+        assert!(w.state().session.mailbox.contact(id).is_none());
+    }
+
+    #[test]
     fn clicks_and_keys_work_the_list() {
         use egui::{Key, PointerButton};
         let mut w = testing::window("view.people");

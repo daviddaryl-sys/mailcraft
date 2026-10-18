@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use mailcraft_mime::WriteOptions;
-use mailcraft_model::sync::{FolderDelta, FolderState, RemoteFlags, SyncRequest, SyncResult};
+use mailcraft_model::sync::{FolderDelta, FolderState, RemoteFlags, SyncRequest, SyncResult, SyncStage, SyncStep};
 use mailcraft_model::{Account, Body, FlagStatus, FolderKind, Id, Message, Security};
 use mailcraft_proto::ProtoError;
 use mailcraft_proto::imap::{Fetched, Imap, Mailbox, uid_sets};
@@ -176,11 +176,13 @@ impl Run<'_> {
         self.stopped
     }
 
-    /// Hand over what happened since the last piece, with a line on how far the run has got.
-    pub(crate) fn hand_over(&mut self, progress: String) {
+    /// Hand over what happened since the last piece, with how far the run has got: as numbers,
+    /// and as the line for a status bar that they make.
+    pub(crate) fn hand_over(&mut self, step: SyncStep) {
         let mut piece = std::mem::replace(&mut self.out, blank(self.request));
         piece.partial = true;
-        piece.progress = progress;
+        piece.progress = step.line();
+        piece.step = Some(step);
         self.send(piece);
     }
 
@@ -253,7 +255,7 @@ fn send_outbox(run: &mut Run) -> Vec<Message> {
         return sent;
     }
     let waiting = request.outbox.len();
-    run.hand_over(format!("Sending {}", messages(waiting)));
+    run.hand_over(SyncStep::new(SyncStage::Sending, "", 0, waiting));
     let mut smtp = match open_smtp_with(&request.account, request.secret(), &run.limits.patience, Some(run.cancel)) {
         Ok(smtp) => smtp,
         Err(e) => {
@@ -281,7 +283,7 @@ fn send_outbox(run: &mut Run) -> Vec<Message> {
                     run.out.filed.push(message.id);
                 }
                 sent.push(message.into_owned());
-                run.hand_over(format!("Sent {} of {waiting}", at + 1));
+                run.hand_over(SyncStep::new(SyncStage::Sending, "", at + 1, waiting));
             }
             Err(e) => {
                 run.out.errors.push(format!("Couldn't send \"{}\": {e}", subject_of(&message)));
@@ -498,7 +500,7 @@ fn exchange<'a>(run: &mut Run<'a>, sent: &[Message], host: Host) -> Option<Imap<
     if run.cancelled() && owed.is_empty() {
         return None;
     }
-    run.hand_over("Connecting to the mail server".into());
+    run.hand_over(SyncStep::new(SyncStage::Connecting, "", 0, 0));
     let watched = owed.is_empty().then_some(run.cancel);
     let mut imap = match open_imap_with(&request.account, request.secret(), &run.limits.patience, watched) {
         Ok(imap) => imap,
@@ -526,17 +528,15 @@ fn exchange<'a>(run: &mut Run<'a>, sent: &[Message], host: Host) -> Option<Imap<
     // The whole tree first: the folders are there to see before their mail is.
     run.out.listed = listed(&plan);
     if !run.out.listed.is_empty() {
-        run.hand_over(format!(
-            "Found {}",
-            if run.out.listed.len() == 1 { "1 folder".to_string() } else { format!("{} folders", plan.len().min(MAX_FOLDERS)) }
-        ));
+        let found = if run.out.listed.len() == 1 { 1 } else { plan.len().min(MAX_FOLDERS) };
+        run.hand_over(SyncStep::new(SyncStage::Listed, "", 0, found));
     }
     // First what the server doesn't know yet, so that what is read afterwards shows it. None of
     // it is left half done because the run was called off, and when the connection is lost on
     // the way, everything else waits for the next run.
     imap.get_mut().watch(None);
     if !owed.is_empty() {
-        run.hand_over("Keeping a copy of what was sent".into());
+        run.hand_over(SyncStep::new(SyncStage::Filing, "", 0, 0));
         if !file_sent(&mut imap, &plan, sent, &mut run.out) {
             return None;
         }
@@ -668,7 +668,7 @@ impl FolderSync<'_> {
     fn run(&self, imap: &mut Imap<Stream<'_>>, run: &mut Run) -> bool {
         let name = shown(&self.remote);
         let label = label(&self.remote);
-        run.hand_over(format!("Checking {label} ({} of {})", self.place.0, self.place.1));
+        run.hand_over(SyncStep::new(SyncStage::Checking, &label, self.place.0, self.place.1));
         let selected = match imap.select(&self.mailbox.raw, true) {
             Ok(selected) => selected,
             Err(e) => return run.failed(&format!("Couldn't open \"{name}\""), &e.into()),
@@ -779,7 +779,7 @@ impl FolderSync<'_> {
                 let mut batch = std::mem::replace(&mut delta, rest);
                 batch.new.sort_by_key(|m| m.uid);
                 run.out.folders.push(batch);
-                run.hand_over(format!("{label}: {} of {total}", at + 1));
+                run.hand_over(SyncStep::new(SyncStage::Reading, &label, at + 1, total));
                 waiting = 0;
             }
         }

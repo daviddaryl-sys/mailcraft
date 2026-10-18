@@ -4734,7 +4734,14 @@ mod contact {
                 return true;
             }
             let run = if let (true, Some(id)) = (clicked.delete, self.id) {
-                Some(("people.delete", json!({"id": id})))
+                // Asked about first, in the main window (#186): the form gives way to the question.
+                return match app.run("people.delete", json!({"id": id})) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        self.error = e;
+                        false
+                    }
+                };
             } else if clicked.ok || (pass.submit && ready) {
                 Some(self.command())
             } else {
@@ -5388,6 +5395,10 @@ mod categories {
             let t = Tokens::get(ui.ctx());
             let enter = ui.input(|i| i.key_pressed(Key::Enter));
             let list = app.session.mailbox.categories.clone();
+            // Once Outlook's list of categories was read, those not on it say so (R3 spec S18).
+            let outlook = &app.session.mailbox.outlook_categories;
+            let not_outlooks: Vec<bool> =
+                list.iter().map(|c| !outlook.is_empty() && !outlook.iter().any(|o| mailcraft_model::sync::same_category(o, &c.name))).collect();
             let mut run: Option<(&'static str, Value)> = None;
             let mut adding = false;
             body(ui, |ui| {
@@ -5416,6 +5427,12 @@ mod categories {
                             run = Some(("category.remove", json!({"name": c.name})));
                         }
                     });
+                    if not_outlooks.get(i).copied().unwrap_or(false) {
+                        ui.horizontal(|ui| {
+                            ui.add_space(ROW_H + ui.spacing().item_spacing.x);
+                            ui.label(egui::RichText::new(tl!("Not in Outlook's list: no colour there")).small().color(t.text_dim));
+                        });
+                    }
                 }
                 if list.is_empty() {
                     ui.label(egui::RichText::new(tl!("No categories yet")).color(t.text_dim));

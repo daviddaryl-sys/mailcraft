@@ -19,7 +19,7 @@ pub fn specs() -> Vec<CommandSpec> {
             .pure()
             .params(r#"{"path": string} — everything in one self-contained file; a copy, unless the mailbox wasn't kept anywhere yet"#),
         CommandSpec::new("file.import", "Import", "File › Open & Export", import)
-            .params(r#"{"path": string} | {"name": string, "data": base64}, "folder"?: number — .eml, .mbox, .ics, .vcf"#),
+            .params(r#"{"path": string} | {"name": string, "data": base64}, "folder"?: number — .eml, .mbox, .ics, .vcf; messages meant for a Microsoft account go to the local folder Imported (`local`)"#),
         CommandSpec::new("file.exportMessage", "Save Message As", "File › Save As", export_message).pure().params(r#"{"id"?: number, "path"?: string} — one message as .eml"#),
         CommandSpec::new("file.exportFolder", "Export Folder", "File › Open & Export", export_folder).pure().params(r#"{"id"?: number, "path"?: string} — a folder's messages as .mbox"#),
         CommandSpec::new("file.exportCalendar", "Save Calendar", "File › Save Calendar", export_calendar).pure().params(r#"{"calendar"?: number, "id"?: number (one event), "path"?: string} — .ics"#),
@@ -33,8 +33,10 @@ pub fn specs() -> Vec<CommandSpec> {
 
 /// Before another mailbox takes this one's place. Where a host keeps the mailbox file up to date
 /// by itself (the desktop app's background saver), what it hasn't written yet is written now:
-/// replacing the mailbox must not lose the changes that fall between two saves. Anywhere else,
-/// leaving a mailbox unsaved is the caller's business, as it always was.
+/// replacing the mailbox must not lose the changes that fall between two saves. That host's
+/// window doesn't wait out a long save the saver is in the middle of (the first after a large
+/// download): the mailbox stays open and says so. Anywhere else, leaving a mailbox unsaved is the
+/// caller's business, as it always was.
 #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
 fn settle(s: &Session) -> Result<(), crate::CmdError> {
     #[cfg(not(target_arch = "wasm32"))]
@@ -42,11 +44,16 @@ fn settle(s: &Session) -> Result<(), crate::CmdError> {
         if let Some(path) = &s.path
             && crate::store::followed(path)
         {
-            crate::store::save(path, &s.mailbox).map_err(|e| fail(format!("the mailbox couldn't be saved first, so it stays open ({e})")))?;
+            crate::store::save_within(path, &s.mailbox, SETTLE_WAIT)
+                .map_err(|e| fail(format!("the mailbox couldn't be saved first, so it stays open ({e})")))?;
         }
     }
     Ok(())
 }
+
+/// How long [`settle`] waits for a save in the background to be done with the file.
+#[cfg(not(target_arch = "wasm32"))]
+const SETTLE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn new(s: &mut Session, v: &Value) -> CmdResult {
     settle(s)?;
@@ -57,9 +64,22 @@ fn new(s: &mut Session, v: &Value) -> CmdResult {
     Ok(json!({"sample": p::bool(v, "sample") == Some(true)}))
 }
 
-/// The mailbox `file.open` is pointed at, and how many of its bodies and attachments couldn't be
-/// read back.
-fn read(v: &Value) -> Result<(Mailbox, usize), crate::CmdError> {
+/// What opening a mailbox file left out, for `file.open` to say.
+#[derive(Default)]
+struct Left {
+    /// Bodies and attachments that couldn't be read back.
+    unavailable: usize,
+    /// Saves left out because a record of theirs is damaged, and the bytes of the file not read.
+    lost_saves: u32,
+    unfinished: u64,
+    /// Items of the mailbox file's first save that are damaged and were left out.
+    lost_records: u32,
+    /// All of it in a sentence for the owner (`store::Opened::notice`).
+    notice: Option<String>,
+}
+
+/// The mailbox `file.open` is pointed at, and what of it couldn't be read back.
+fn read(v: &Value) -> Result<(Mailbox, Left), crate::CmdError> {
     // A file on disk is opened where it is: it may keep its content in a folder beside it.
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -70,7 +90,14 @@ fn read(v: &Value) -> Result<(Mailbox, usize), crate::CmdError> {
                 return Err(fail(format!("{path} isn't a mailbox; bring it in with File › Import")));
             }
             let opened = crate::store::open(std::path::Path::new(path)).map_err(fail)?;
-            return Ok((opened.mailbox, opened.unavailable));
+            let left = Left {
+                unavailable: opened.unavailable,
+                lost_saves: opened.lost_saves,
+                unfinished: opened.unfinished,
+                lost_records: opened.lost_records,
+                notice: opened.notice(),
+            };
+            return Ok((opened.mailbox, left));
         }
     }
     let (name, bytes) = source(v)?;
@@ -79,13 +106,13 @@ fn read(v: &Value) -> Result<(Mailbox, usize), crate::CmdError> {
         Some(_) => return Err(fail(format!("{name} isn't a mailbox; bring it in with File › Import"))),
         None => return Err(fail(format!("{name} isn't a MailCraft mailbox"))),
     }
-    Ok((crate::io::read_mailbox(&bytes).map_err(fail)?, 0))
+    Ok((crate::io::read_mailbox(&bytes).map_err(fail)?, Left::default()))
 }
 
 fn open(s: &mut Session, v: &Value) -> CmdResult {
     // First, so that opening the file the mailbox is kept in reads what was just written.
     settle(s)?;
-    let (mailbox, unavailable) = read(v)?;
+    let (mailbox, left) = read(v)?;
     s.replace_mailbox(mailbox);
     // Only a real file is a place to save back to.
     s.path = if v.get("data").is_some() { None } else { p::str(v, "path").map(Into::into) };
@@ -95,20 +122,33 @@ fn open(s: &mut Session, v: &Value) -> CmdResult {
     if favorites_now_graph > 0 {
         s.mailbox_changed();
     }
+    // Mail of Microsoft accounts kept with characters that couldn't be read is fetched again,
+    // once (#185).
+    let fetched_again = super::graph_down::refetch_unreadable(&mut s.mailbox);
+    if fetched_again > 0 {
+        s.mailbox_changed();
+    }
     Ok(json!({
         "favoritesNowGraph": favorites_now_graph,
+        "fetchedAgain": fetched_again,
         "accounts": s.mailbox.accounts.len(),
         "messages": s.mailbox.messages.len(),
         "contacts": s.mailbox.contacts.len(),
         "events": s.mailbox.events.len(),
         "tasks": s.mailbox.tasks.len(),
-        "unavailable": unavailable,
+        "unavailable": left.unavailable,
+        // What of the file was damaged and left out, and what to tell the owner about it.
+        "lostSaves": left.lost_saves,
+        "unfinished": left.unfinished,
+        "lostRecords": left.lost_records,
+        "notice": left.notice,
     }))
 }
 
-/// The mailbox as one self-contained file: what a caller without a place for files gets.
+/// The mailbox as one self-contained file: what a caller without a place for files gets. Every
+/// byte of it: what the mailbox keeps outside memory is fetched first.
 fn single_file(s: &Session) -> Result<Vec<u8>, crate::CmdError> {
-    crate::io::write_mailbox(&s.mailbox).map_err(fail)
+    crate::io::write_mailbox(&s.loaded_mailbox()?).map_err(fail)
 }
 
 /// Save where the mailbox is kept (or to `path`, which is where it is kept from then on): the
@@ -121,7 +161,14 @@ fn save(s: &mut Session, v: &Value) -> CmdResult {
     let Some(path) = path else { return deliver(v, &format!("mailbox.{MAILBOX_EXT}"), single_file(s)?) };
     #[cfg(not(target_arch = "wasm32"))]
     let r = {
-        let saved = crate::store::save(std::path::Path::new(&path), &s.mailbox).map_err(fail)?;
+        // Saved somewhere else than where it is kept, the mailbox takes everything along: the
+        // content folder there has none of what this one keeps.
+        let elsewhere = s.path.as_ref().is_none_or(|kept| kept.as_path() != std::path::Path::new(&path));
+        let saved = if elsewhere {
+            crate::store::save(std::path::Path::new(&path), &s.loaded_mailbox()?).map_err(fail)?
+        } else {
+            crate::store::save(std::path::Path::new(&path), &s.mailbox).map_err(fail)?
+        };
         json!({"path": path, "bytes": saved.bytes, "blobs": saved.blobs})
     };
     #[cfg(target_arch = "wasm32")]
@@ -129,6 +176,7 @@ fn save(s: &mut Session, v: &Value) -> CmdResult {
     if r.get("path").is_some() {
         s.path = Some(path.into());
         s.dirty = false;
+        s.note_saved();
     }
     Ok(r)
 }
@@ -141,7 +189,7 @@ fn save_as(s: &mut Session, v: &Value) -> CmdResult {
     let path = p::req_str(v, "path")?.to_string();
     #[cfg(not(target_arch = "wasm32"))]
     let r = {
-        let bytes = crate::store::save_single(std::path::Path::new(&path), &s.mailbox).map_err(fail)?;
+        let bytes = crate::store::save_single(std::path::Path::new(&path), &s.loaded_mailbox()?).map_err(fail)?;
         json!({"path": path, "bytes": bytes})
     };
     #[cfg(target_arch = "wasm32")]
@@ -150,6 +198,7 @@ fn save_as(s: &mut Session, v: &Value) -> CmdResult {
     if r.get("path").is_some() && home {
         s.path = Some(path.into());
         s.dirty = false;
+        s.note_saved();
     }
     Ok(with(r, "copy", json!(!home)))
 }
@@ -161,18 +210,27 @@ fn import(s: &mut Session, v: &Value) -> CmdResult {
 
 fn export_message(s: &mut Session, v: &Value) -> CmdResult {
     let id = p::id(v, "id").or(s.sel.focus()).ok_or_else(|| fail("select a message first"))?;
-    let m = s.mailbox.message(id).ok_or_else(|| fail(format!("no message with id {id}")))?;
+    if s.mailbox.message(id).is_none() {
+        return Err(fail(format!("no message with id {id}")));
+    }
+    // Whole: what the mailbox keeps outside memory goes into the file.
+    let m = s.loaded_message(id)?;
     // A draft keeps its Bcc line; a sent or received message never had one to show.
     let opts = mailcraft_mime::WriteOptions { include_bcc: m.draft, offset_minutes: s.offset_at(m.date) };
     let name = file_name(if m.subject.trim().is_empty() { "message" } else { &m.subject }, "eml");
-    deliver(v, &name, mailcraft_mime::write(m, &opts))
+    deliver(v, &name, mailcraft_mime::write(&m, &opts))
 }
 
 fn export_folder(s: &mut Session, v: &Value) -> CmdResult {
     let id = p::id(v, "id").unwrap_or(s.view.folder);
     let folder = s.mailbox.folder(id).ok_or_else(|| fail(format!("no folder with id {id}")))?;
-    let mut messages: Vec<&mailcraft_model::Message> = s.mailbox.messages_in(id).map(|m| m.as_ref()).collect();
-    messages.sort_by_key(|m| (m.date, m.id));
+    // Each message whole: what the mailbox keeps outside memory goes into the file.
+    let mut whole: Vec<std::sync::Arc<mailcraft_model::Message>> = Vec::new();
+    for m in s.mailbox.messages_in(id) {
+        whole.push(s.loaded_message(m.id)?);
+    }
+    whole.sort_by_key(|m| (m.date, m.id));
+    let messages: Vec<&mailcraft_model::Message> = whole.iter().map(|m| m.as_ref()).collect();
     let opts = mailcraft_mime::WriteOptions { include_bcc: false, offset_minutes: s.offset_at(s.now()) };
     let bytes = mailcraft_mime::write_mbox(&messages, &opts);
     let r = deliver(v, &file_name(&folder.name, "mbox"), bytes)?;

@@ -15,8 +15,9 @@ jobs:
     if: contains(github.event.issue.labels.*.name, 'tester')
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           sparse-checkout: .github/tester-welcome.md
           sparse-checkout-cone-mode: false
       - run: gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file .github/tester-welcome.md

@@ -222,7 +222,7 @@ impl Walk {
         };
         let name = file_name.unwrap_or_else(|| media::default_name(&mime));
         let inline = disposition.value == "inline" || (!content_id.is_empty() && parent == Parent::Related);
-        self.attachments.push(Attachment { name, mime, content_id, inline, data: Arc::new(decode(body, &encoding)) });
+        self.attachments.push(Attachment { name, mime, content_id, inline, data: Arc::new(decode(body, &encoding)), kept: None });
     }
 
     fn add_text(&mut self, text: String, parent: Parent) {
@@ -465,7 +465,7 @@ mod tests {
             "iVBORw0KGgo=",
             "--rel--",
         ]));
-        assert_eq!(m.body.text, "Logo:\n\n[Our logo]");
+        assert_eq!(m.body.text, "Logo: [Our logo]");
         assert_eq!(m.attachments.len(), 1);
         let logo = &m.attachments[0];
         assert_eq!(

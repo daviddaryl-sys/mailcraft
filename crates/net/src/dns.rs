@@ -180,8 +180,9 @@ mod tests {
     #[test]
     fn the_next_name_server_is_asked_when_one_fails() {
         let good = FakeHttp::answering(ok(ANSWER));
-        // A port that was just free: nothing listens there.
-        let closed = format!("http://127.0.0.1:{}/dns-query", std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port());
+        // Nothing listens there. Not a port that was just free: the stand-ins below could be given
+        // it, and one of them would then be asked twice (#111).
+        let closed = "http://127.0.0.1:1/dns-query".to_string();
         let broken = [
             FakeHttp::answering(json_answer("500 Internal Server Error", "{}")),
             FakeHttp::answering(json_answer("302 Found", ANSWER)),

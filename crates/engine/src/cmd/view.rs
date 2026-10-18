@@ -110,6 +110,10 @@ fn search(s: &mut Session, v: &Value) -> CmdResult {
     if let Some(scope) = p::str(v, "scope") {
         s.view.scope = parse_enum::<Scope>(scope).ok_or_else(|| bad("`scope` is folder or everywhere"))?;
     }
+    // A new search forgets what the servers found for the last (R6.2).
+    if s.view.search != query {
+        s.server_search.forget();
+    }
     s.view.search = query;
     s.view.module = Module::Mail;
     Ok(json!({"query": s.view.search, "scope": s.view.scope, "found": s.rows().len()}))
@@ -117,6 +121,7 @@ fn search(s: &mut Session, v: &Value) -> CmdResult {
 
 fn clear_search(s: &mut Session, _: &Value) -> CmdResult {
     s.view.search.clear();
+    s.server_search.forget();
     s.view.scope = Scope::Folder;
     done()
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use mailcraft_time::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::sync::{RemoteFlags, ServerMessage};
+use crate::sync::{MovingOut, RemoteFlags, ServerMessage};
 use crate::{Address, Id};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -46,6 +46,23 @@ pub enum FlagStatus {
     Complete,
 }
 
+/// Where the bytes of a part of a message are while they aren't in memory: a content file beside
+/// the mailbox file, named by the SHA-256 of its bytes and checked against its length (the
+/// engine's `store`). A mailbox a program works on keeps attachments, and the bodies of older
+/// mail, this way, and brings them in when something needs them (`Session::content`). Never
+/// written to a file: the mailbox file names the content in its own way.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContentRef {
+    pub sha256: [u8; 32],
+    pub len: u64,
+}
+
+impl std::fmt::Debug for ContentRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ContentRef({} bytes)", self.len)
+    }
+}
+
 /// A file carried by a message.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -59,23 +76,48 @@ pub struct Attachment {
     /// Shown inside the body rather than in the attachment list.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub inline: bool,
+    /// The bytes, when they are in memory. Empty for a file that is kept outside (`kept`) until
+    /// something asks for it.
     #[serde(with = "crate::b64")]
     pub data: Arc<Vec<u8>>,
+    /// Where the bytes are when `data` doesn't hold them. `None` for a file that is whole in
+    /// memory (one that was just made, or brought in). Not written: the mailbox file has its
+    /// own way of naming content, and a self-contained file carries the bytes.
+    #[serde(skip)]
+    pub kept: Option<ContentRef>,
 }
 
 impl Attachment {
     pub fn new(name: impl Into<String>, mime: impl Into<String>, data: Vec<u8>) -> Attachment {
-        Attachment { name: name.into(), mime: mime.into(), content_id: String::new(), inline: false, data: Arc::new(data) }
+        Attachment { name: name.into(), mime: mime.into(), content_id: String::new(), inline: false, data: Arc::new(data), kept: None }
     }
 
+    /// How many bytes the file is, in memory or where it is kept.
     pub fn size(&self) -> usize {
-        self.data.len()
+        match self.kept {
+            Some(k) if self.data.is_empty() => usize::try_from(k.len).unwrap_or(usize::MAX),
+            _ => self.data.len(),
+        }
+    }
+
+    /// Whether its bytes are in memory (`data` is the file). `false` for one kept outside and not
+    /// brought in yet, whose bytes `Session::content` fetches.
+    pub fn is_loaded(&self) -> bool {
+        self.kept.is_none() || !self.data.is_empty()
     }
 
     /// `12 KB`, `3.4 MB`.
     pub fn size_label(&self) -> String {
         size_label(self.size() as u64)
     }
+}
+
+/// A hash of a body's text, to know it again within one run ([`KeptBody::text_hash`]).
+pub fn text_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
 }
 
 /// A byte count for people.
@@ -163,6 +205,93 @@ pub struct Message {
     /// `synced` are IMAP's and stay as they are.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::sync::lenient")]
     pub server: Option<ServerMessage>,
+    /// Only its headers and a preview are here: it is not **fetched** yet. Every
+    /// message of a file from before this was kept is whole.
+    #[serde(skip_serializing_if = "is_false")]
+    pub unfetched: bool,
+    /// While it is not fetched: the server said it has attachments (Graph's `hasAttachments`),
+    /// which its headers and preview don't show. It wears the paperclip and `has:attachment`
+    /// finds it; once it is fetched its own attachments say.
+    #[serde(skip_serializing_if = "is_false")]
+    pub attachments_on_server: bool,
+    /// It was moved here, out of a Microsoft account (into a local folder or another account),
+    /// from the server's copy this names, and that copy is still on the server: it is **being
+    /// moved** (R3 spec S19). The server's copy is removed only once this message is fetched
+    /// whole and the mailbox file holding it is saved. `None` for every other message.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::sync::lenient")]
+    pub moving_out: Option<MovingOut>,
+    /// The server's copy was gone before it could be fetched: only the headers and preview it
+    /// had are here, kept as they are, and nothing will fetch the rest (R3 spec S19).
+    #[serde(skip_serializing_if = "is_false")]
+    pub incomplete: bool,
+    /// For a draft of a Microsoft account: its marker on the server, what the server last had
+    /// of it, and whether it waits to go up (R3.4.1). `None` for every other message.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::sync::lenient")]
+    pub server_draft: Option<crate::sync::ServerDraft>,
+    /// For a message of a Microsoft account's Outbox that is **held** (R3.4.2): what happened and
+    /// what to check. It isn't sent again until the owner says so. Empty for every other message.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub held: String,
+    /// For a reply or forward written here and not sent yet: the message it answers or forwards,
+    /// which is marked so once this has gone (#154), not when Send is pressed. `None` for every
+    /// other message, and once it is sent.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::sync::lenient")]
+    pub answers: Option<Answers>,
+    /// Where the body is while it isn't in memory ([`KeptBody`]); `None` once it is (or when it
+    /// always was). Not written: see [`Attachment::kept`].
+    #[serde(skip)]
+    pub kept: Option<Box<KeptBody>>,
+}
+
+/// The message a reply or forward not sent yet answers or forwards ([`Message::answers`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Answers {
+    /// The original's id in this mailbox.
+    pub message: Id,
+    /// The original's `Message-ID`, when it has one: a message under that id that isn't it (the
+    /// mailbox was put together otherwise since) isn't marked.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub message_id: String,
+    /// It is a forward (the original is marked forwarded); otherwise a reply (marked replied).
+    #[serde(skip_serializing_if = "is_false")]
+    pub forward: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Where a message's text and HTML are while they aren't in memory ([`Message::kept`]): the body
+/// of a message older than the memory a mailbox is given at opening, brought in when the message
+/// is shown, searched, answered or exported. While it is kept, `body.text` is empty (or says the
+/// text is unavailable, once bringing it in failed) and `body.html` is `None`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeptBody {
+    pub text: Option<ContentRef>,
+    pub html: Option<ContentRef>,
+    /// Bringing it in was tried and failed (the file is missing or damaged): the text says so,
+    /// and nothing tries again until the mailbox is opened anew.
+    pub failed: bool,
+    /// [`text_hash`] of `body.text` as the mailbox was opened (a short text is in the mailbox
+    /// file itself, with its HTML kept outside): the kept HTML goes with that text and no other.
+    pub text_hash: u64,
+}
+
+impl KeptBody {
+    pub fn is_empty(&self) -> bool {
+        self.text.is_none() && self.html.is_none()
+    }
+
+    /// Whether `text` is the text the mailbox was opened with.
+    pub fn same_text(&self, text: &str) -> bool {
+        self.text_hash == text_hash(text)
+    }
+
+    /// How many bytes the kept text and HTML come to.
+    pub fn len(&self) -> u64 {
+        self.text.map_or(0, |r| r.len).saturating_add(self.html.map_or(0, |r| r.len))
+    }
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -175,20 +304,24 @@ impl Message {
         self.to.iter().chain(&self.cc).chain(&self.bcc)
     }
 
-    /// Whether the attachment list has something.
+    /// Whether the attachment list has something, or, for a message not fetched yet, the server
+    /// said it will ([`Message::attachments_on_server`]).
     pub fn has_attachments(&self) -> bool {
-        self.listed_attachments().next().is_some()
+        (self.unfetched && self.attachments_on_server) || self.listed_attachments().next().is_some()
     }
 
     /// The attachments the attachment list shows, with their index: everything except pictures
     /// the HTML body shows in place (`cid:` references). A file merely marked "inline" by the
-    /// sending program, which nothing in the body refers to, is still listed.
+    /// sending program, which nothing in the body refers to, is still listed. While the HTML is
+    /// kept outside memory ([`Message::kept`]), an inline picture with a `Content-ID` is taken to
+    /// be one it shows, until the HTML is read and says.
     pub fn listed_attachments(&self) -> impl Iterator<Item = (usize, &Attachment)> {
         let html = self.body.html.as_deref().unwrap_or("");
+        let html_kept = self.body.html.is_none() && self.kept.as_ref().is_some_and(|k| k.html.is_some() && !k.failed);
         self.attachments
             .iter()
             .enumerate()
-            .filter(move |(_, a)| !(a.inline && !a.content_id.is_empty() && html.contains(&format!("cid:{}", a.content_id))))
+            .filter(move |(_, a)| !(a.inline && !a.content_id.is_empty() && (html_kept || html.contains(&format!("cid:{}", a.content_id)))))
     }
 
     /// The subject without `Re:` / `Fw:` prefixes: what a conversation is about.
@@ -203,9 +336,29 @@ impl Message {
         if t.is_empty() { format!("\u{0}{}", self.id) } else { t }
     }
 
-    /// Size in bytes, roughly: text, HTML and attachments.
+    /// Size in bytes, roughly: text, HTML and attachments, in memory or where they are kept.
     pub fn size(&self) -> u64 {
-        (self.body.text.len() + self.body.html.as_ref().map_or(0, String::len) + self.attachments.iter().map(Attachment::size).sum::<usize>()) as u64
+        let kept = self.kept.as_deref();
+        let text = if self.body.text.is_empty() { kept.and_then(|k| k.text).map_or(0, |r| r.len) } else { self.body.text.len() as u64 };
+        let html = match &self.body.html {
+            Some(h) => h.len() as u64,
+            None => kept.and_then(|k| k.html).map_or(0, |r| r.len),
+        };
+        self.attachments.iter().map(|a| a.size() as u64).fold(text.saturating_add(html), u64::saturating_add)
+    }
+
+    /// Whether some of the body is kept outside memory and not brought in yet ([`Message::kept`]):
+    /// its text is empty, or its HTML missing, until it is. Not so once bringing it in failed
+    /// (the text says so then).
+    pub fn body_is_kept(&self) -> bool {
+        self.kept
+            .as_ref()
+            .is_some_and(|k| !k.failed && ((k.text.is_some() && self.body.text.is_empty()) || (k.html.is_some() && self.body.html.is_none())))
+    }
+
+    /// Whether everything of the message is in memory: its body and every attachment.
+    pub fn is_loaded(&self) -> bool {
+        !self.body_is_kept() && self.attachments.iter().all(Attachment::is_loaded)
     }
 
     pub fn has_category(&self, name: &str) -> bool {
@@ -275,5 +428,34 @@ mod tests {
         assert!(json.contains("\"data\":\"AP8H\""), "{json}");
         assert_eq!(serde_json::from_str::<Message>(&json).unwrap(), m);
         assert!(serde_json::from_str::<Attachment>(r#"{"name":"x","data":"***"}"#).is_err());
+    }
+
+    #[test]
+    fn what_is_kept_outside_memory_counts_and_is_never_written() {
+        let r = |len: u64| ContentRef { sha256: [7; 32], len };
+        let logo = Attachment { content_id: "logo@x.example".into(), inline: true, kept: Some(r(900)), ..Attachment::default() };
+        let file = Attachment { name: "a.pdf".into(), kept: Some(r(5_000)), ..Attachment::default() };
+        let mut m = Message {
+            body: Body { text: "Short text.".into(), html: None },
+            attachments: vec![logo, file],
+            kept: Some(Box::new(KeptBody { html: Some(r(2_000)), text_hash: text_hash("Short text."), ..KeptBody::default() })),
+            ..Message::default()
+        };
+        // Sizes are what they are on disk; nothing of it is in memory.
+        assert_eq!((m.size(), m.attachments[0].size()), (11 + 2_000 + 900 + 5_000, 900));
+        assert!(m.body_is_kept() && !m.is_loaded() && !m.attachments[1].is_loaded());
+        // While the HTML waits, an inline picture with a Content-ID is taken for one it shows.
+        assert_eq!(m.listed_attachments().map(|(i, _)| i).collect::<Vec<_>>(), vec![1]);
+        // Written to a file, none of it is said (the mailbox file names content its own way).
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("kept") && !json.contains("textHash"), "{json}");
+        // Brought in, the HTML says what is shown; a read that failed is no longer waiting.
+        m.body.html = Some("<p>No picture here.</p>".into());
+        assert!(!m.body_is_kept() && m.listed_attachments().count() == 2);
+        m.body.html = None;
+        if let Some(k) = m.kept.as_deref_mut() {
+            k.failed = true;
+        }
+        assert!(!m.body_is_kept() && m.listed_attachments().count() == 2);
     }
 }

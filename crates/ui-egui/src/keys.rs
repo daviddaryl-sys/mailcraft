@@ -142,6 +142,18 @@ pub fn global_shortcuts(app: &mut MailApp, ctx: &egui::Context) {
         return;
     }
     let typing = ctx.egui_wants_keyboard_input();
+    // Esc ends a search, as the ✕ on the bar over the list does (#115). (In the search box
+    // itself, the box does it; an open menu takes Esc for itself.)
+    if !typing
+        && !egui::Popup::is_any_open(ctx)
+        && app.session.compose.is_none()
+        && app.session.view.module == mailcraft_engine::Module::Mail
+        && !app.session.view.search.trim().is_empty()
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape))
+    {
+        app.search_text.clear();
+        let _ = app.run("view.clearSearch", json!({}));
+    }
     // The body of a message being written has keys of its own (Ctrl+B, U, Z…), which mean
     // something else everywhere else.
     let in_body = typing && crate::compose::editor::has_focus(ctx);

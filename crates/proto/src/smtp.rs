@@ -6,7 +6,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::line::Wire;
-use crate::{ProtoError, Secrets, tidy, xoauth2};
+use crate::{ProtoError, Secrets, for_trace, tidy, xoauth2};
 
 /// Most lines one reply may have.
 const MAX_REPLY_LINES: usize = 256;
@@ -272,7 +272,7 @@ impl<S: Read + Write> Smtp<S> {
 
     /// Send `line`; the log gets `shown` instead.
     fn secret_command(&mut self, line: &str, shown: &str) -> Result<Reply, ProtoError> {
-        log::trace!("C: {}", self.secrets.hide(shown));
+        log::trace!("C: {}", for_trace(&self.secrets.hide(shown)));
         let mut out = Vec::with_capacity(line.len() + 2);
         out.extend_from_slice(line.as_bytes());
         out.extend_from_slice(b"\r\n");
@@ -286,7 +286,7 @@ impl<S: Read + Write> Smtp<S> {
         for n in 0..MAX_REPLY_LINES {
             let raw = self.wire.read_line()?;
             let line = String::from_utf8_lossy(&raw);
-            log::trace!("S: {}", self.secrets.hide(&line));
+            log::trace!("S: {}", for_trace(&self.secrets.hide(&line)));
             // Three digits, then `-` (more lines follow), a space or nothing (the last line).
             let code = line.get(..3).filter(|d| d.bytes().all(|b| b.is_ascii_digit())).and_then(|d| d.parse::<u16>().ok());
             let rest = line.get(3..).unwrap_or("");

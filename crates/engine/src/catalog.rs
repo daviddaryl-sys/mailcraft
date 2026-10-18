@@ -43,6 +43,7 @@ Search|Refine|Categorized|view.search
 Search|Refine|Unread|view.search
 Search|Refine|Flagged|view.search
 Search|Refine|Important|view.search
+Search|Results|More Results on the Server|sync.graphSearchRequest
 Search|Options|Recent Searches|view.recentSearches
 Search|Options|Search Folders|folder.newSearchFolder
 Home|New|New Email|mail.new

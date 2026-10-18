@@ -4,7 +4,7 @@ use egui::{Align2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use mailcraft_engine::{Module, Pane, Scope};
 use serde_json::json;
 
-use crate::theme::{Tokens, TypeRung, medium, paint_text, regular, semibold, text_width};
+use crate::theme::{Tokens, TypeRung, medium, regular, semibold, text_width};
 use crate::{MailApp, icons};
 
 fn qat_button(ui: &mut Ui, app: &mut MailApp, icon: &str, tip: &str, id: &str) -> egui::Response {
@@ -208,25 +208,72 @@ pub fn title_bar(app: &mut MailApp, ui: &mut Ui) {
         });
 }
 
+/// How tall the status bar is.
+pub const STATUS_BAR_H: f32 = 30.0;
+/// The size of the status bar's text.
+const STATUS_TEXT: f32 = 12.0;
+/// The bar a Send/Receive under way fills, in the status bar.
+const SYNC_BAR: egui::Vec2 = egui::Vec2::new(120.0, 6.0);
+/// The most of the bar's width a message at its left takes, so the right side keeps room.
+const STATUS_MSG_SHARE: f32 = 0.45;
+
+/// What the status bar says of Send/Receive.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SyncShown {
+    /// Nothing.
+    Nothing,
+    /// A run under way: a steady label and how far it has got (0 to 1), never the folder it is at.
+    Bar { label: String, fraction: f32 },
+    /// What it did, a problem, or what it waits for (a sign-in in the browser), in words.
+    Text(String),
+}
+
+/// What the status bar says of Send/Receive now: while a run goes on, a bar under a label that
+/// changes only from one account to the next; else the words the run left.
+pub(crate) fn sync_shown(app: &MailApp) -> SyncShown {
+    let progress = &app.session.sync_progress;
+    let waiting_for_owner = app.signing_in() || app.approving();
+    if let Some(fraction) = progress.fraction().filter(|_| app.syncing() && !waiting_for_owner) {
+        let label = if app.services.sync_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            tl!("Stopping…").to_string()
+        } else {
+            match progress.current().and_then(|r| app.session.mailbox.account(r.account)) {
+                Some(account) => {
+                    let name: String = account.name.chars().filter(|c| !c.is_control()).take(32).collect();
+                    crate::i18n::fmt(tl!("Updating {account}"), &[("account", name.trim())])
+                }
+                None => tl!("Send/Receive").to_string(),
+            }
+        };
+        return SyncShown::Bar { label, fraction };
+    }
+    let sync = &app.session.sync_status;
+    if sync.is_empty() { SyncShown::Nothing } else { SyncShown::Text(sync.clone()) }
+}
+
 /// The status bar, across the foot of the window.
 pub fn status_bar(app: &mut MailApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     egui::Panel::bottom("status")
-        .exact_size(26.0)
+        .exact_size(STATUS_BAR_H)
         // No line around it: the bar is the window's own colour, and the panes above it are not.
         .show_separator_line(false)
         .frame(egui::Frame::NONE.fill(t.status_bar).inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 0 }))
         .show(ui, |ui| {
+            let full_w = ui.available_width();
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing = vec2(14.0, 0.0);
-                let st = |ui: &mut Ui, s: &str, color: egui::Color32| {
-                    let font = TypeRung::Caption.regular();
-                    let track = TypeRung::Caption.tracking();
-                    let w = text_width(ui.painter(), s, &font, track, color);
-                    let (r, resp) = ui.allocate_exact_size(vec2(w + 1.0, TypeRung::Caption.line_height()), Sense::hover());
-                    paint_text(ui.painter(), pos2(r.min.x, r.min.y), Align2::LEFT_TOP, s, &font, track, color);
-                    resp
+                // One line of text, no wider than `most` or the room there is: what doesn't fit
+                // ends in an ellipsis, and the whole of it is shown under the pointer.
+                let st_most = |ui: &mut Ui, s: &str, color: egui::Color32, most: f32| {
+                    let font = regular(STATUS_TEXT);
+                    let whole = text_width(ui.painter(), s, &font, 0.0, color);
+                    let w = whole.min(most).min(ui.available_width() - 2.0).max(0.0);
+                    let (r, resp) = ui.allocate_exact_size(vec2(w + 1.0, STATUS_TEXT * 1.4), Sense::hover());
+                    crate::theme::paint_clipped(ui.painter(), pos2(r.min.x, r.center().y), w + 1.0, s, font, color);
+                    if w + 0.5 < whole { resp.on_hover_text(s) } else { resp }
                 };
+                let st = |ui: &mut Ui, s: &str, color: egui::Color32| st_most(ui, s, color, f32::INFINITY);
                 let n = |count: usize, one: &str, many: &str| {
                     crate::i18n::fmt(if count == 1 { tl!(one) } else { tl!(many) }, &[("n", &count.to_string())])
                 };
@@ -260,7 +307,8 @@ pub fn status_bar(app: &mut MailApp, ui: &mut Ui) {
                 if let Some((msg, at)) = &app.status_msg
                     && crate::now_ms() - at < 6000.0
                 {
-                    st(ui, msg, t.accent_text);
+                    let shown = st_most(ui, msg, t.accent_text, full_w * STATUS_MSG_SHARE);
+                    app.hit.add("statusMessage", 0, shown.rect);
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -286,29 +334,143 @@ pub fn status_bar(app: &mut MailApp, ui: &mut Ui) {
                         }
                         ui.add_space(10.0);
                     }
-                    let sync = app.session.sync_status.clone();
-                    // The last Send/Receive had problems: one click shows all of what it said.
-                    if app.has_sync_problems() && ui.link(egui::RichText::new(tl!("Send/Receive problems")).color(t.red)).clicked() {
-                        let _ = app.run("ui.dialog", json!({"name": "syncProblems"}));
+                    // The last Send/Receive had problems: one click shows them, in Send/Receive
+                    // Progress under their accounts.
+                    if app.has_sync_problems() {
+                        let link = ui.link(egui::RichText::new(tl!("Send/Receive problems")).size(STATUS_TEXT).color(t.red));
+                        app.hit.add("syncProblemsLink", 0, link.rect);
+                        if link.clicked() {
+                            let _ = app.run("ui.dialog", json!({"name": "syncProblems"}));
+                        }
                     }
-                    if !sync.is_empty() {
+                    let shown_sync = sync_shown(app);
+                    if shown_sync != SyncShown::Nothing {
                         // Waiting for the owner in the browser (or for an administrator on
                         // Microsoft's approval page) can be given up from here.
-                        if (app.signing_in() || app.approving()) && ui.link(tl!("Cancel")).clicked() {
+                        if (app.signing_in() || app.approving()) && ui.link(egui::RichText::new(tl!("Cancel")).size(STATUS_TEXT)).clicked() {
                             let _ = app.run("ui.cancelSignIn", json!({}));
                         }
                         // So can a Send/Receive that is taking long: what it brought stays.
-                        if app.syncing() && ui.link(tl!("Cancel")).on_hover_text(tl!("Stop this Send/Receive; what has arrived stays")).clicked() {
+                        if app.syncing()
+                            && ui
+                                .link(egui::RichText::new(tl!("Cancel")).size(STATUS_TEXT))
+                                .on_hover_text(tl!("Stop this Send/Receive; what has arrived stays"))
+                                .clicked()
+                        {
                             let _ = app.run("ui.cancelSync", json!({}));
                         }
-                        st(ui, &sync, t.text_dim);
+                        ui.add_space(6.0);
+                        // What Send/Receive is doing, or did: a click shows it account by account.
+                        let shown = match &shown_sync {
+                            SyncShown::Bar { label, fraction } => sync_bar(app, ui, &t, label, *fraction),
+                            SyncShown::Text(said) => st(ui, said, t.text_dim),
+                            SyncShown::Nothing => ui.allocate_exact_size(vec2(0.0, 0.0), Sense::hover()).1,
+                        };
+                        let shown = shown.interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                        app.hit.add("syncStatus", 0, shown.rect);
+                        if shown.hovered() {
+                            ui.painter().hline(shown.rect.x_range(), shown.rect.max.y - 1.0, egui::Stroke::new(1.0, t.text_dim));
+                        }
+                        // Under the pointer, the run's own words say where it is.
+                        let tip = match &shown_sync {
+                            SyncShown::Bar { .. } if !app.session.sync_status.is_empty() => {
+                                format!("{}\n{}", app.session.sync_status, tl!("Show Send/Receive Progress"))
+                            }
+                            _ => tl!("Show Send/Receive Progress").to_string(),
+                        };
+                        if shown.on_hover_text(tip).clicked() {
+                            if app.sync_panel.is_some() {
+                                app.sync_panel = None;
+                            } else {
+                                let _ = app.run("ui.dialog", json!({"name": "syncProgress"}));
+                            }
+                        }
                     } else if app.session.mailbox.accounts.iter().all(|a| a.kind == mailcraft_model::AccountKind::Local) {
                         st(ui, tl!("This mailbox is on this device only"), t.text_dim)
                             .on_hover_text(tl!("Add a mail server account in File › Add Account to send and receive."));
                     }
+                    // Messages being fetched whole in the background (R3.2).
+                    let fetching = app.fetching.progress.clone();
+                    if !fetching.is_empty() {
+                        ui.add_space(10.0);
+                        st(ui, &fetching, t.text_dim);
+                    }
+                    // A save that takes a while, in the background (R6.3).
+                    if let Some(saving) = app.saving_text() {
+                        ui.add_space(10.0);
+                        st(ui, &saving, t.text_dim);
+                    }
+                    // The word index being built, in the background (R6.2).
+                    indexing_bar(app, ui, &t);
                 });
             });
         });
+}
+
+/// A Send/Receive under way, in the status bar: its label, then a bar that fills as the run goes
+/// and never goes back while it lasts (an account that joins the run doesn't empty it).
+fn sync_bar(app: &mut MailApp, ui: &mut Ui, t: &Tokens, label: &str, fraction: f32) -> egui::Response {
+    let (resp, track) = progress_bar(ui, t, label, fraction, "status_sync_bar");
+    app.hit.add("syncBar", 0, track);
+    resp
+}
+
+/// A label and a bar that fills as `fraction` goes from 0 to 1, in the status bar: the bar never
+/// goes back while it is shown (`key` remembers how far it got). Returns the whole and the bar.
+fn progress_bar(ui: &mut Ui, t: &Tokens, label: &str, fraction: f32, key: &str) -> (egui::Response, Rect) {
+    let font = regular(STATUS_TEXT);
+    let gap = 8.0;
+    let label_w = text_width(ui.painter(), label, &font, 0.0, t.text_dim).min(220.0);
+    let room = (ui.available_width() - 2.0).max(0.0);
+    let bar_w = SYNC_BAR.x.min(room);
+    let label_w = label_w.min((room - bar_w - gap).max(0.0));
+    let (r, resp) = ui.allocate_exact_size(vec2(label_w + gap + bar_w, STATUS_TEXT * 1.4), Sense::hover());
+    let key = egui::Id::new(key);
+    let before: f32 = ui.ctx().data(|d| d.get_temp(key)).unwrap_or(0.0);
+    let shown = fraction.clamp(0.0, 1.0).max(before);
+    ui.ctx().data_mut(|d| d.insert_temp(key, shown));
+    if label_w > 4.0 {
+        crate::theme::paint_clipped(ui.painter(), pos2(r.min.x, r.center().y), label_w + 1.0, label, font, t.text_dim);
+    }
+    let track = Rect::from_min_size(pos2(r.max.x - bar_w, r.center().y - SYNC_BAR.y / 2.0), vec2(bar_w, SYNC_BAR.y));
+    let radius = SYNC_BAR.y / 2.0;
+    ui.painter().rect_filled(track, radius, if t.dark { t.border } else { t.border_strong.linear_multiply(0.6) });
+    if shown > 0.0 {
+        let fill = Rect::from_min_max(track.min, pos2(track.min.x + (bar_w * shown).max(SYNC_BAR.y), track.max.y));
+        ui.painter().rect_filled(fill, radius, t.accent);
+    }
+    (resp, track)
+}
+
+/// The word index being built (R6.2), in the status bar: "Indexing mail: 45%" and its bar, as
+/// Send/Receive shows its progress. Nothing when it isn't being built; the bar's memory of how
+/// far it got goes when it is done.
+fn indexing_bar(app: &mut MailApp, ui: &mut Ui, t: &Tokens) {
+    let key = "status_index_bar";
+    let mailcraft_engine::WordIndex::Building { done, total } = app.session.word_index() else {
+        ui.ctx().data_mut(|d| d.remove::<f32>(egui::Id::new(key)));
+        return;
+    };
+    if total == 0 {
+        // Its file being read, or a moment's look at what came since: nothing to count.
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+        return;
+    }
+    let fraction = (done.min(total) as f64 / total as f64) as f32;
+    let percent = ((fraction * 100.0).floor() as u32).min(100);
+    let label = crate::i18n::fmt(tl!("Indexing mail: {percent}%"), &[("percent", &percent.to_string())]);
+    ui.add_space(10.0);
+    let (resp, track) = progress_bar(ui, t, &label, fraction, key);
+    app.hit.add("indexBar", 0, track);
+    resp.on_hover_text(tl!("Building the index search answers from; until it is done, some older mail is searched more slowly"));
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+}
+
+/// Forget how far the bar of the last run got, once no run is under way.
+pub(crate) fn sync_bar_rest(app: &MailApp, ctx: &egui::Context) {
+    if !matches!(sync_shown(app), SyncShown::Bar { .. }) {
+        ctx.data_mut(|d| d.remove::<f32>(egui::Id::new("status_sync_bar")));
+    }
 }
 
 /// A heading with a count beside it, for the tops of panes.

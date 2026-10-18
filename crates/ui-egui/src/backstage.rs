@@ -103,17 +103,31 @@ fn tile(ui: &mut Ui, icon: &str, title: &str, detail: &str, t: &Tokens) -> bool 
 fn info(app: &mut MailApp, ui: &mut Ui, t: &Tokens) {
     heading(ui, tl!("Info"), t);
     section(ui, tl!("Accounts"), t);
-    let accounts = app.session.mailbox.accounts.clone();
+    // (Each shared mailbox right under the account it is opened through, a little in: #70.)
+    let accounts: Vec<mailcraft_model::Account> = app.session.mailbox.accounts_in_order().into_iter().cloned().collect();
     for a in &accounts {
-        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width().min(560.0), 58.0), Sense::hover());
+        let owner = app.session.mailbox.owner_of(a.id).map(|o| o.email.clone());
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width().min(560.0), 58.0), Sense::hover());
+        let r = if a.is_shared() { Rect::from_min_max(pos2(row.min.x + 24.0, row.min.y), row.max) } else { row };
         ui.painter().rect(r, 6.0, t.panel, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
         crate::widgets::avatar(ui, pos2(r.min.x + 30.0, r.center().y), 17.0, &a.address());
         let title = if a.email.is_empty() { tl!("Local mailbox").to_string() } else { a.address().full() };
-        crate::theme::paint_clipped(ui.painter(), pos2(r.min.x + 58.0, r.min.y + 20.0), r.width() - 240.0, &title, semibold(13.0), t.text);
+        // The text runs up to the buttons at the right: Settings, and Remove when there are others
+        // (a shared mailbox has Remove alone).
+        let buttons = if a.is_shared() { 1 } else { usize::from(!a.email.is_empty()) + usize::from(accounts.len() > 1) };
+        let text_w = r.width() - 70.0 - 82.0 * buttons as f32;
+        crate::theme::paint_clipped(ui.painter(), pos2(r.min.x + 58.0, r.min.y + 20.0), text_w, &title, semibold(13.0), t.text);
         let server = |s: &Option<mailcraft_model::Server>| {
             s.as_ref().map(|s| format!("{}{}", s.host, if s.security == Security::None { tl!(" (not encrypted)") } else { "" }))
         };
         let detail = match a.kind {
+            AccountKind::Microsoft if a.is_shared() && app.shared_refused.contains_key(&a.id) => {
+                tl!("Shared mailbox · No access: Microsoft won't open it for you. Send/Receive tries again").to_string()
+            }
+            AccountKind::Microsoft if a.is_shared() => match &owner {
+                Some(owner) => crate::i18n::fmt(tl!("Shared mailbox · opened with {owner}'s sign-in (testing)"), &[("owner", owner)]),
+                None => tl!("Shared mailbox · the account it was opened through is gone: remove it").to_string(),
+            },
             AccountKind::Local => tl!("On this device only: no mail server").to_string(),
             AccountKind::Microsoft => tl!("Signs in with Microsoft · folders kept in step through Microsoft Graph (testing)").to_string(),
             AccountKind::Imap => {
@@ -129,27 +143,69 @@ fn info(app: &mut MailApp, ui: &mut Ui, t: &Tokens) {
                 }
             }
         };
-        crate::theme::paint_clipped(ui.painter(), pos2(r.min.x + 58.0, r.min.y + 39.0), r.width() - 240.0, &detail, regular(11.5), t.text_dim);
+        crate::theme::paint_clipped(ui.painter(), pos2(r.min.x + 58.0, r.min.y + 39.0), text_w, &detail, regular(11.5), t.text_dim);
         // Sending, calendar and contacts through Microsoft wait for the owner's say-so.
         if app.graph_consent_needed(a.id) {
-            let link = ui.link(tl!("Connect calendar and contacts")).on_hover_text(tl!(
-                "Sign in once more to let MailCraft send through Microsoft and show your calendar and contacts. Mail works without it."
-            ));
+            // An account kept in step through Graph gets its mail that way too: without it, none.
+            let link = if a.kind == AccountKind::Microsoft {
+                ui.link(tl!("Connect to Microsoft (mail, calendar and contacts)")).on_hover_text(tl!(
+                    "Sign in once more to let MailCraft read and change your mail, send, and show your calendar and contacts through Microsoft."
+                ))
+            } else {
+                ui.link(tl!("Connect calendar and contacts")).on_hover_text(tl!(
+                    "Sign in once more to let MailCraft send through Microsoft and show your calendar and contacts. Mail works without it."
+                ))
+            };
             if link.clicked() {
                 let _ = app.run("ui.connectMicrosoft", json!({"account": a.id}));
             }
         }
-        if !a.email.is_empty() {
-            let br = Rect::from_min_size(pos2(r.max.x - 168.0, r.center().y - 13.0), vec2(74.0, 26.0));
-            if ui.put(br, egui::Button::new(tl!("Settings"))).on_hover_text(tl!("Change this account's name, servers and sign-in")).clicked() {
-                let _ = app.run("ui.dialog", json!({"name": "account", "id": a.id}));
-            }
+        // The buttons sit on the card: placed without moving the page's layout on (`ui.put` would
+        // take it back up into the card, and what follows was drawn over it).
+        let on_card = |ui: &mut Ui, right: f32, button: egui::Button<'_>| {
+            let br = Rect::from_min_size(pos2(r.max.x - right, r.center().y - 13.0), vec2(74.0, 26.0));
+            ui.new_child(egui::UiBuilder::new().max_rect(br)).add_sized(br.size(), button)
+        };
+        let settings_at = if accounts.len() > 1 { 168.0 } else { 86.0 };
+        // (A shared mailbox has no settings of its own: its owner's sign-in reads it, #70.)
+        if !a.email.is_empty()
+            && !a.is_shared()
+            && on_card(ui, settings_at, egui::Button::new(tl!("Settings")))
+                .on_hover_text(tl!("Change this account's name, servers and sign-in"))
+                .clicked()
+        {
+            let _ = app.run("ui.dialog", json!({"name": "account", "id": a.id}));
         }
-        if accounts.len() > 1 {
-            let br = Rect::from_min_size(pos2(r.max.x - 86.0, r.center().y - 13.0), vec2(74.0, 26.0));
-            if ui.put(br, egui::Button::new(tl!("Remove"))).on_hover_text(tl!("Remove this account and the mail kept for it here")).clicked() {
-                let _ = app.run("account.remove", json!({"id": a.id}));
+        if a.is_shared() {
+            if on_card(ui, 86.0, egui::Button::new(tl!("Remove")))
+                .on_hover_text(tl!("Close this shared mailbox and remove the mail kept for it here. Nothing on the server changes."))
+                .clicked()
+            {
+                let _ = app.run("account.removeSharedMailbox", json!({"id": a.id}));
             }
+        } else if accounts.len() > 1
+            && on_card(ui, 86.0, egui::Button::new(tl!("Remove"))).on_hover_text(tl!("Remove this account and the mail kept for it here")).clicked()
+        {
+            let _ = app.run("account.remove", json!({"id": a.id}));
+        }
+        // Which messages are kept whole on this computer (R3.2); a shared mailbox keeps as much
+        // as its owner's account (#70).
+        if a.kind == AccountKind::Microsoft && !a.is_shared() {
+            download_in_full(app, ui, a);
+        }
+        // A mailbox of the organisation that the owner was given Full Access to (#70).
+        // (Not for a personal Microsoft account, which has none; only while they are being tested.)
+        if app.session.shared_mailboxes && crate::shared_mailboxes::can_open_shared(a) {
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                let link = ui.link(tl!("Add Shared Mailbox…")).on_hover_text(tl!(
+                    "Open a mailbox of your organisation that you were given Full Access to, such as a team's, under this account"
+                ));
+                if link.clicked() {
+                    let _ = app.run("ui.dialog", json!({"name": "sharedMailbox", "account": a.id}));
+                }
+            });
+            ui.add_space(4.0);
         }
     }
     if tile(
@@ -207,6 +263,37 @@ fn info(app: &mut MailApp, ui: &mut Ui, t: &Tokens) {
     if tile(ui, "categorize", tl!("Categories"), tl!("Names and colours for sorting mail, events, people and tasks"), t) {
         let _ = app.run("ui.dialog", json!({"name": "categories"}));
     }
+}
+
+/// "Download messages in full" for a Microsoft account: everything, or up to a size (larger ones
+/// download when opened).
+fn download_in_full(app: &mut MailApp, ui: &mut Ui, a: &mailcraft_model::Account) {
+    use mailcraft_model::DownloadInFull;
+    let choices = [
+        (DownloadInFull::UpTo10Mb, "upTo10Mb", tl!("Up to 10 MB")),
+        (DownloadInFull::UpTo25Mb, "upTo25Mb", tl!("Up to 25 MB")),
+        (DownloadInFull::UpTo50Mb, "upTo50Mb", tl!("Up to 50 MB")),
+        (DownloadInFull::Everything, "everything", tl!("Everything")),
+    ];
+    let now = choices.iter().find(|(c, _, _)| *c == a.download_in_full).map_or("", |(_, _, label)| *label);
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(12.0);
+        ui.label(tl!("Download messages in full:"));
+        egui::ComboBox::from_id_salt(("download-in-full", a.id))
+            .selected_text(now)
+            .show_ui(ui, |ui| {
+                for (choice, code, label) in choices {
+                    if ui.selectable_label(a.download_in_full == choice, label).clicked() && a.download_in_full != choice {
+                        let _ = app.run("account.edit", json!({"id": a.id, "downloadInFull": code}));
+                        app.resume_fetch();
+                    }
+                }
+            })
+            .response
+            .on_hover_text(tl!("Larger messages download when you open them. Choosing less removes nothing already downloaded."));
+    });
+    ui.add_space(8.0);
 }
 
 fn open(app: &mut MailApp, ui: &mut Ui, t: &Tokens) {
@@ -284,6 +371,10 @@ fn options(app: &mut MailApp, ui: &mut Ui, t: &Tokens) {
             }
         });
     });
+    if app.services.update_check.is_some() {
+        section(ui, tl!("Updates"), t);
+        crate::updates::options(app, ui, t);
+    }
     let prefs = app.session.prefs.clone();
     let set = |app: &mut MailApp, params: serde_json::Value| {
         let _ = app.run("file.options", params);
@@ -427,10 +518,6 @@ fn options(app: &mut MailApp, ui: &mut Ui, t: &Tokens) {
     }
     crate::reading::invitation_options(app, ui);
     time_zones(app, ui, &prefs);
-    section(ui, tl!("Signatures"), t);
-    if ui.button(tl!("Signatures…")).clicked() {
-        let _ = app.run("ui.backstage", json!({"value": true, "page": "signatures"}));
-    }
 }
 
 /// The time zone the calendar is shown in, and a second one for its time bar, each with a label
@@ -505,8 +592,16 @@ fn about(app: &mut MailApp, ui: &mut Ui, t: &Tokens) {
         "Mail, calendar, people and tasks, written from scratch in Rust. It runs natively on macOS, Windows, Linux and BSD, and in the browser."
     ));
     ui.label(tl!("Open source under the MIT License or the Apache License 2.0, at your option."));
+    if app.services.update_check.is_some() {
+        section(ui, tl!("Updates"), t);
+        crate::updates::about(app, ui, t);
+    }
     section(ui, tl!("Contributors"), t);
     contributors(ui);
+    if ui.button(tl!("Show Contributors")).clicked() {
+        app.ui.backstage = false;
+        let _ = app.run("ui.dialog", json!({"name": "contributors"}));
+    }
     section(ui, tl!("What it is made of"), t);
     ui.label(tl!("The interface fonts are Inter, Source Sans 3 and JetBrains Mono (SIL Open Font License 1.1). Every icon is drawn in code and is original work. No artwork, fonts or text from other mail programs are included."));
     section(ui, tl!("Your mail stays yours"), t);

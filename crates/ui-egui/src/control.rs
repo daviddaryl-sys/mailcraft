@@ -8,7 +8,9 @@
 //! - `ui.click {x, y, button?, count?, shift?, cmd?}`, `ui.move {x, y}`, `ui.drag {x, y, toX, toY}`:
 //!   real pointer input in screen points (reaches every widget)
 //! - `ui.key {key, shift?, alt?, cmd?}`, `ui.text {text}`: keyboard input through egui
-//! - `ui.screenshot {path?}`: PNG of the window
+//! - `ui.screenshot {path?, inline?}`: PNG of the window (`inline`: as base64 `data` in the answer)
+//!
+//! A request the MCP bridge marked as an agent's (`agent`) goes through [`crate::agent_gate`].
 //! - `ui.parity`: feature catalog parity
 
 use std::sync::mpsc::Sender;
@@ -21,18 +23,41 @@ pub struct ControlRequest {
     pub method: String,
     pub params: Value,
     pub reply: Sender<Value>,
+    /// From an agent (the MCP bridge marks its requests), with what the owner allowed it in
+    /// advance; `None`: the owner's own script.
+    pub agent: Option<Vec<mailcraft_engine::agent::Class>>,
 }
 
 impl ControlRequest {
     pub fn new(method: impl Into<String>, params: Value) -> (Self, std::sync::mpsc::Receiver<Value>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        (Self { method: method.into(), params, reply: tx }, rx)
+        (Self { method: method.into(), params, reply: tx, agent: None }, rx)
     }
+
+    /// The same request, as an agent's that was allowed `allow`.
+    pub fn from_agent(mut self, allow: Vec<mailcraft_engine::agent::Class>) -> Self {
+        self.agent = Some(allow);
+        self
+    }
+}
+
+/// What the `agent` field of a control-channel request allows (`{"allow": ["send", …]}`;
+/// names it doesn't know allow nothing).
+pub fn agent_allow(v: &Value) -> Vec<mailcraft_engine::agent::Class> {
+    v.get("allow")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).filter_map(mailcraft_engine::agent::Class::parse).collect())
+        .unwrap_or_default()
 }
 
 pub enum Outcome {
     Done(Value),
-    Screenshot { path: Option<String> },
+    Screenshot {
+        path: Option<String>,
+        inline: bool,
+    },
+    /// The owner is asked first ([`crate::agent_gate`]); the answer goes back from there.
+    Pending,
 }
 
 /// Where things were drawn this frame: message rows, folders, events, contacts, tasks. Agents and
@@ -82,6 +107,9 @@ pub fn inspect(app: &mut MailApp, ctx: &egui::Context) -> Value {
         "selection": app.session.sel,
         "composing": app.session.compose.is_some(),
         "dialog": app.dialog.as_ref().map(|d| d.name()),
+        // Send/Receive Progress, a panel in the window rather than a dialog.
+        "panel": app.sync_panel.as_ref().map(|_| "syncProgress"),
+        "agentQuestion": app.asking.front().map(|a| json!({"command": a.id, "needs": a.class.as_str(), "what": a.what})),
         "windows": crate::windows::inspect(app),
         "window": [r.width(), r.height()],
         "items": app.hit.to_json(),
@@ -89,6 +117,7 @@ pub fn inspect(app: &mut MailApp, ctx: &egui::Context) -> Value {
         "dirty": app.session.dirty,
         "syncing": app.syncing(),
         "dav": {"syncing":app.dav.rx.is_some(),"status":app.dav.status},
+        "saving": app.saving_inspect(),
         "status": app.status_msg.as_ref().map(|(m, _)| m.clone()),
         "textSelection": crate::reading::selection_inspect(app, ctx),
         "perf": {"frameMs": app.frame_ms},
@@ -172,13 +201,26 @@ pub fn commands(app: &MailApp) -> Value {
     let mut all: Vec<Value> = reg
         .all()
         .iter()
-        .map(|c| json!({"id": c.id, "label": c.label, "location": c.location, "shortcut": c.shortcut, "params": c.params, "enabled": (c.enabled)(&app.session).is_none()}))
+        .map(|c| {
+            let mut v = json!({"id": c.id, "label": c.label, "location": c.location, "shortcut": c.shortcut, "params": c.params, "enabled": (c.enabled)(&app.session).is_none()});
+            mailcraft_engine::agent_fields(&mut v, c.id);
+            v
+        })
         .collect();
-    all.extend(crate::UI_COMMANDS.iter().map(|(id, label, location, params)| json!({"id": id, "label": label, "location": location, "shortcut": "", "params": params, "enabled": app.enabled(id)})));
+    all.extend(crate::UI_COMMANDS.iter().map(|(id, label, location, params)| {
+        let mut v = json!({"id": id, "label": label, "location": location, "shortcut": "", "params": params, "enabled": app.enabled(id)});
+        mailcraft_engine::agent_fields(&mut v, id);
+        v
+    }));
     Value::Array(all)
 }
 
 pub fn handle(app: &mut MailApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
+    if let Some(allow) = &req.agent
+        && let Some(settled) = crate::agent_gate::screen(app, req, allow)
+    {
+        return settled;
+    }
     let p = &req.params;
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     let f = |k: &str| p.get(k).and_then(Value::as_f64).map(|v| v as f32).filter(|v| v.is_finite());
@@ -258,7 +300,11 @@ pub fn handle(app: &mut MailApp, ctx: &egui::Context, req: &ControlRequest) -> O
             app.synthetic.push(egui::Event::Text(t.to_string()));
             ok(json!({"queued": true}))
         }
-        "ui.screenshot" => Outcome::Screenshot { path: s("path").map(str::to_string) },
+        // An agent's comes back in the answer: nothing is written.
+        "ui.screenshot" => Outcome::Screenshot {
+            path: s("path").map(str::to_string),
+            inline: req.agent.is_some() || p.get("inline").and_then(Value::as_bool) == Some(true),
+        },
         "ui.resize" => {
             let (Some(w), Some(h)) = (f("width"), f("height")) else { return err("missing width/height") };
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w.clamp(200.0, 10_000.0), h.clamp(200.0, 10_000.0))));
@@ -280,6 +326,20 @@ pub fn handle(app: &mut MailApp, ctx: &egui::Context, req: &ControlRequest) -> O
             }
         }
     }
+}
+
+/// The window as PNG, base64 in the answer (`data`).
+pub fn inline_screenshot(image: &egui::ColorImage) -> Value {
+    let [w, h] = image.size;
+    let bytes: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
+    let Some(buffer) = image::RgbaImage::from_raw(w as u32, h as u32, bytes) else {
+        return json!({"ok": false, "error": "the screenshot had no pixels"});
+    };
+    let mut png = std::io::Cursor::new(Vec::new());
+    if let Err(e) = buffer.write_to(&mut png, image::ImageFormat::Png) {
+        return json!({"ok": false, "error": e.to_string()});
+    }
+    json!({"ok": true, "result": {"data": mailcraft_engine::cmd::base64_encode(png.get_ref()), "width": w, "height": h}})
 }
 
 pub fn save_screenshot(image: &egui::ColorImage, path: Option<&str>) -> Value {

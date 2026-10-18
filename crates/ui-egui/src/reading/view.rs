@@ -140,7 +140,14 @@ fn in_pieces(blocks: Vec<Block>) -> (Vec<Block>, Vec<Option<Glue>>) {
                 BlockKind::ListItem { depth, .. } if n > 0 => BlockKind::ListItem { marker: Marker::None, depth: *depth },
                 kind => kind.clone(),
             };
-            out.push(Block { kind, spans, quote: block.quote, align: block.align, space: if n == 0 { block.space } else { 0 } });
+            out.push(Block {
+                kind,
+                spans,
+                quote: block.quote,
+                align: block.align,
+                space: if n == 0 { block.space } else { 0 },
+                beside: n == 0 && block.beside,
+            });
             cuts.push((n > 0).then_some(glue));
         }
     }

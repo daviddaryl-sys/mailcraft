@@ -1,0 +1,76 @@
+# cargo-deny: what the dependency tree may contain (`cargo xtask deny`, and the `deny` job in
+# .github/workflows/ci.yml). https://embarkstudios.github.io/cargo-deny/
+#
+# - advisories: a RustSec vulnerability fails the build; an unmaintained or yanked crate warns.
+#   An ignored advisory carries the reason and the date it was looked at.
+# - licenses: OSI-approved permissive licences only. No GPL, LGPL or AGPL, ever (clean room,
+#   CLAUDE.md): a crate offered under "X OR GPL" is taken under X. The two non-OSI licences the
+#   tree needs are allowed for exactly the crate that needs them.
+# - bans: two versions of one crate warn (the GUI stack brings some).
+# - sources: crates.io, and craft-libs (the Craft apps' shared code) from its git repository alone,
+#   pinned by `rev` in Cargo.toml.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+unmaintained = "all"
+yanked = "warn"
+ignore = [
+    # 2026-10-17: zvariant, zvariant_derive and zbus_names are merged into zbus 6 and no longer
+    # kept up as crates of their own; nothing is known wrong with them.
+    # 2026-10-18: the credential store moved from keyring 3 to keyring-core 1, and with it from
+    # zbus 4 to zbus 5, so zbus 4 (zvariant 4, zbus_names 3) is gone from the tree. What remains is
+    # zbus 5 (zvariant 5, zbus_names 4) on Linux and FreeBSD, through the GUI stack's accessibility
+    # (eframe, accesskit, atspi) and the Secret Service store (secret-service 5), neither of which
+    # has moved to zbus 6 yet. Look again when they do.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant merged into zbus 6; zbus 5 waits on accesskit/atspi and secret-service" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6; zbus 5 waits on accesskit/atspi and secret-service" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6; zbus 5 waits on accesskit/atspi and secret-service" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "OFL-1.1",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[[licenses.exceptions]]
+# Mozilla's root certificates as data (webpki-roots, our TLS trust anchors): a permissive data
+# licence, not OSI, used for this crate alone.
+name = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
+[[licenses.exceptions]]
+# egui's built-in fonts (Ubuntu Light among them): the Ubuntu Font Licence permits redistribution;
+# not OSI, used for this crate alone.
+name = "epaint_default_fonts"
+allow = ["Ubuntu-font-1.0"]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+# Workspace crates name each other by path alone; every crates.io dependency has a version.
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/storytold/craft-libs", "https://github.com/UCS-Care-Group/winit"]

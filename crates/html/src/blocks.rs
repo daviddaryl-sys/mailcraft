@@ -384,6 +384,9 @@ struct Builder {
     pre_start: bool,
     /// Inside `<template>`, which is never shown.
     template: usize,
+    /// The last thing added was a picture, and the line it is in goes on: what comes next in
+    /// that line, before a line break or a block of its own, stands beside it.
+    after_picture: bool,
 }
 
 impl Builder {
@@ -413,6 +416,7 @@ impl Builder {
             marker: String::new(),
             pre_start: false,
             template: 0,
+            after_picture: false,
         }
     }
 
@@ -560,9 +564,12 @@ impl Builder {
             self.push('\n');
             return;
         }
-        // A break with no text before it is an empty line.
+        // A break with no text before it is an empty line; right after a picture, it only ends
+        // the picture's line.
         if self.spans.is_empty() {
-            self.add_space();
+            if !std::mem::take(&mut self.after_picture) {
+                self.add_space();
+            }
             return;
         }
         if let Some(last) = self.spans.last_mut() {
@@ -616,6 +623,8 @@ impl Builder {
     fn flush(&mut self) {
         self.fresh = true;
         if self.spans.is_empty() {
+            // Nothing in the line since the picture: whatever ends the block ends its line too.
+            self.after_picture = false;
             return;
         }
         let pre = self.kind == BlockKind::Preformatted;
@@ -623,11 +632,28 @@ impl Builder {
         let spans = std::mem::take(&mut self.spans);
         let kind = std::mem::replace(&mut self.kind, BlockKind::Paragraph);
         if spans.iter().all(|s| s.text.chars().all(is_blank)) {
-            // A paragraph that holds only a no-break space is how mail programs write an empty line.
-            self.add_space();
+            // A paragraph that holds only a no-break space is how mail programs write an empty
+            // line; but the spaces between two pictures in a line only part them.
+            if !self.after_picture {
+                self.add_space();
+            }
             return;
         }
-        let block = Block { kind, spans, quote: self.quote_depth(), align: self.align, space: 0 };
+        let beside = std::mem::take(&mut self.after_picture);
+        let mut spans = spans;
+        if beside {
+            // The spaces between the picture and the text are the gap between them, drawn as such.
+            while let Some(first) = spans.first_mut() {
+                let kept = first.text.trim_start_matches(is_blank).len();
+                let cut = first.text.len().saturating_sub(kept);
+                first.text = first.text.get(cut..).unwrap_or_default().to_string();
+                if !first.text.is_empty() {
+                    break;
+                }
+                spans.remove(0);
+            }
+        }
+        let block = Block { kind, spans, quote: self.quote_depth(), align: self.align, space: 0, beside };
         self.emit(block, false);
         // `text<br><br>` ends with an empty line.
         if !pre && breaks >= 2 {
@@ -692,6 +718,10 @@ impl Builder {
         let alt: String = alt.split_whitespace().collect::<Vec<_>>().join(" ").chars().filter(|c| !c.is_control()).collect();
         match picture_url(tag.attr("src")) {
             Some(src) => {
+                // Text in the line before it, or a picture with nothing but spaces since: the
+                // picture stands in that line.
+                let blank = self.spans.iter().all(|s| s.text.chars().all(is_blank));
+                let beside = !blank || self.after_picture;
                 self.flush();
                 self.settle();
                 let style = self.style().clone();
@@ -701,8 +731,11 @@ impl Builder {
                 let size = |v: Option<f32>| v.map(|v| v.round().clamp(1.0, MAX_IMAGE_PX) as u16);
                 let (width, height) = (size(width.or(css.width)), size(height.or(css.height)));
                 let kind = BlockKind::Image { src, width, height, link: style.link.as_deref().map(str::to_string) };
-                let block = Block { kind, spans, quote: self.quote_depth(), align: style.align, space: 0 };
+                let count = self.frame().blocks.len();
+                let block = Block { kind, spans, quote: self.quote_depth(), align: style.align, space: 0, beside };
                 self.emit(block, false);
+                // (Only when it was added: past the cap there is no line to go on.)
+                self.after_picture = self.frame().blocks.len() > count;
             }
             // No picture to load: its description is all there is, where text can be read.
             None if self.style().tiny => {}
@@ -1112,7 +1145,7 @@ impl Builder {
             width: table.width,
             background: table.background,
         });
-        let block = Block { kind, spans: Vec::new(), quote: self.quote_depth(), align: table.align, space: 0 };
+        let block = Block { kind, spans: Vec::new(), quote: self.quote_depth(), align: table.align, space: 0, beside: false };
         self.emit(block, true);
     }
 

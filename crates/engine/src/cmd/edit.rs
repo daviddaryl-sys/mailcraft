@@ -1,4 +1,5 @@
-//! Undo and redo.
+//! Undo and redo. For a Microsoft account, undoing a change that reached its server is another
+//! change, which the next run sends; what can't be undone there is said ([`crate::undo`]).
 
 use serde_json::{Value, json};
 
@@ -16,11 +17,22 @@ pub fn specs() -> Vec<CommandSpec> {
 fn undo(s: &mut Session, _: &Value) -> CmdResult {
     let label = s.undo_label();
     s.undo();
-    Ok(json!({"undone": label}))
+    let said = said(s);
+    Ok(json!({"undone": label, "notUndone": said}))
 }
 
 fn redo(s: &mut Session, _: &Value) -> CmdResult {
     let label = s.redo_label();
     s.redo();
-    Ok(json!({"redone": label}))
+    let said = said(s);
+    Ok(json!({"redone": label, "notRedone": said}))
+}
+
+/// What the undo or redo couldn't do, said in the status bar too.
+fn said(s: &mut Session) -> Vec<String> {
+    let said = s.undo_said().to_vec();
+    if !said.is_empty() {
+        s.sync_status = said.join(" ");
+    }
+    said
 }

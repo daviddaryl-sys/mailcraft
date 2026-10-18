@@ -35,7 +35,7 @@ See [automatic-setup.md](automatic-setup.md) for supported discovery and remaini
 > **Out of date.** Written on 2026-10-11 and not kept up since: pictures in mail, invitations,
 > reminders that fire and much else have landed. For what is true now, see [`gaps.md`](gaps.md)
 > and [`ROADMAP.md`](../ROADMAP.md). This page is folded into those two in step R8.3 of the
-> [roadmap reset](plans/roadmap-reset.md).
+> roadmap reset.
 
 What MailCraft can and can't do next to the program it is an alternative to. The measured number
 is the ribbon/menu catalog ([`parity-checklist.md`](parity-checklist.md)); everything else here

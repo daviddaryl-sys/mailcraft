@@ -3,6 +3,7 @@ name = "mailcraft-ui-egui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "MailCraft egui front end (Outlook-style ribbon UI); swappable: nothing below depends on it"
 
 [lints]
@@ -24,5 +25,11 @@ image = { workspace = true }
 # The browser clock (the std clocks panic on wasm32).
 js-sys = "0.3"
 
+[build-dependencies]
+# contributors/: the credits of About, baked in by build.rs.
+serde_json = { workspace = true }
+toml = "1"
+
 [dev-dependencies]
+toml = "1"
 egui_kittest = { workspace = true, features = ["wgpu", "snapshot"] }

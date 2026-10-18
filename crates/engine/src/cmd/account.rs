@@ -6,20 +6,23 @@
 
 use std::collections::{HashMap, HashSet};
 
-use mailcraft_model::sync::{Deleted, FlagsPushed, FolderDelta, FolderState, Moved, RemoteFlags, RemoteOp, SyncRequest, SyncResult, summary_line};
+use mailcraft_model::sync::{
+    Deleted, FlagsPushed, FolderDelta, FolderState, Moved, RemoteFlags, RemoteOp, SyncRequest, SyncResult, SyncStage, summary_line,
+};
 use mailcraft_model::{
     Account, AccountKind, Directory, FlagStatus, Folder, FolderKind, Id, Mailbox, Message, OAuth, OAuthProvider, Pending, Security, Server,
     clean_name,
 };
 use serde_json::{Value, json};
 
+use super::sync_progress::{self, Piece};
 use super::{bad, fail};
 use crate::{CmdError, CmdResult, CommandSpec, Session, p};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("account.add", "Add Account", "File › Info", add).params(ACCOUNT),
-        CommandSpec::new("account.edit", "Account Settings", "File › Info", edit).params(r#"{"id": number, …the fields of account.add}"#),
+        CommandSpec::new("account.edit", "Account Settings", "File › Info", edit).params(r#"{"id": number, …the fields of account.add, "downloadInFull"?: "upTo10Mb"|"upTo25Mb"|"upTo50Mb"|"everything" (a Microsoft account: which messages are fetched whole in the background)}"#),
         CommandSpec::new("account.remove", "Remove Account", "File › Info", remove).params(r#"{"id": number}"#),
         CommandSpec::new("account.list", "List Accounts", "File › Info", list).pure(),
         CommandSpec::new("account.preset", "Suggest Account Settings", "File › Info", preset)
@@ -34,11 +37,7 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
 }
 
-/// Why `account.add` won't make an account kept in step through Microsoft Graph.
-pub const GRAPH_MAIL_OFF: &str =
-    "Microsoft accounts kept in step through Microsoft Graph are being tested: start MailCraft with MAILCRAFT_GRAPH_MAIL=1 to add one";
-
-const ACCOUNT: &str = r#"{"email": string, "displayName"?: string, "name"?: string, "username"?: string, "davUrl"?: string (optional HTTPS CalDAV/CardDAV discovery URL; same password), "carddavUrl"?: string (separate HTTPS contacts URL), "davUsername"?: string (DAV login if different), "incoming"?: {"host": string, "port"?: number, "security"?: "tls"|"starttls"|"none"} | null, "outgoing"?: same | null, "auth"?: "password"|"oauth2" (oauth2: sign in on the provider's page), "provider"?: "microsoft", "clientId"?: string, "tenant"?: string, "directory"?: "organisation"|"personal" (which kind of Microsoft account signs in, when the sign-in said), "kind"?: "imap"|"local"|"microsoft" (microsoft: kept in step through Microsoft Graph, no mail servers; only while MAILCRAFT_GRAPH_MAIL=1 is set)}"#;
+const ACCOUNT: &str = r#"{"email": string, "displayName"?: string, "name"?: string, "username"?: string, "davUrl"?: string (optional HTTPS CalDAV/CardDAV discovery URL; same password), "carddavUrl"?: string (separate HTTPS contacts URL), "davUsername"?: string (DAV login if different), "incoming"?: {"host": string, "port"?: number, "security"?: "tls"|"starttls"|"none"} | null, "outgoing"?: same | null, "auth"?: "password"|"oauth2" (oauth2: sign in on the provider's page), "provider"?: "microsoft", "clientId"?: string, "tenant"?: string, "directory"?: "organisation"|"personal" (which kind of Microsoft account signs in, when the sign-in said), "kind"?: "imap"|"local"|"microsoft" (microsoft: kept in step through Microsoft Graph, no mail servers)}"#;
 
 fn has_server(s: &Session) -> Option<&'static str> {
     if s.mailbox.accounts.iter().any(|a| a.kind.has_server()) {
@@ -177,7 +176,7 @@ fn preset(_: &mut Session, v: &Value) -> CmdResult {
     }))
 }
 
-fn apply_fields(a: &mut Account, v: &Value, graph_mail: bool) -> Result<(), CmdError> {
+fn apply_fields(a: &mut Account, v: &Value) -> Result<(), CmdError> {
     let line = |k: &str| p::str(v, k).map(|t| t.replace(['\r', '\n'], " ").trim().chars().take(254).collect::<String>());
     if let Some(e) = line("email") {
         a.email = e;
@@ -226,19 +225,16 @@ fn apply_fields(a: &mut Account, v: &Value, graph_mail: bool) -> Result<(), CmdE
         return Err(bad("A separate CardDAV URL also needs a CalDAV URL"));
     }
     sign_in(a, v)?;
-    if !a.dav_url.is_empty() && a.oauth.is_some() {
-        return Err(bad("DAV currently requires password sign-in"));
+    // Which messages are fetched whole in the background (R3 spec S12).
+    if let Some(limit) = p::str(v, "downloadInFull") {
+        a.download_in_full =
+            serde_json::from_value(json!(limit.trim())).map_err(|_| bad("`downloadInFull` is upTo10Mb, upTo25Mb, upTo50Mb or everything"))?;
     }
-    // A Microsoft account kept in step through Graph (R3): asked for by name, and only while the
-    // switch for testing is on; one that is that already stays it.
+    // A Microsoft account kept in step through Graph (R3): asked for by name; one that is that
+    // already stays it. (One kept in step by IMAP becomes one by switching: `account.graphSwitch`.)
     let microsoft = match p::str(v, "kind").map(|k| k.trim().to_ascii_lowercase()) {
         None => a.kind == AccountKind::Microsoft,
-        Some(k) if k == "microsoft" || k == "graph" => {
-            if !graph_mail && a.kind != AccountKind::Microsoft {
-                return Err(fail(GRAPH_MAIL_OFF));
-            }
-            true
-        }
+        Some(k) if k == "microsoft" || k == "graph" => true,
         Some(k) if k == "imap" || k == "local" => false,
         Some(_) => return Err(bad("`kind` is imap, local or microsoft")),
     };
@@ -251,6 +247,9 @@ fn apply_fields(a: &mut Account, v: &Value, graph_mail: bool) -> Result<(), CmdE
     } else {
         a.kind = if a.incoming.is_some() || a.outgoing.is_some() { AccountKind::Imap } else { AccountKind::Local };
     }
+    if !a.dav_url.is_empty() && a.oauth.is_some() {
+        return Err(bad("DAV currently requires password sign-in"));
+    }
     if !a.address().is_valid() {
         return Err(bad(format!("\"{}\" isn't an e-mail address", a.email)));
     }
@@ -262,7 +261,7 @@ fn apply_fields(a: &mut Account, v: &Value, graph_mail: bool) -> Result<(), CmdE
 
 fn add(s: &mut Session, v: &Value) -> CmdResult {
     let mut a = Account::default();
-    apply_fields(&mut a, v, s.graph_mail)?;
+    apply_fields(&mut a, v)?;
     if s.mailbox.accounts.iter().any(|x| x.email.eq_ignore_ascii_case(&a.email)) {
         return Err(fail(format!("{} is already set up", a.email)));
     }
@@ -287,7 +286,17 @@ fn add(s: &mut Session, v: &Value) -> CmdResult {
 fn edit(s: &mut Session, v: &Value) -> CmdResult {
     let id = p::req_id(v, "id")?;
     let mut a = s.mailbox.account(id).cloned().ok_or_else(|| fail(format!("no account with id {id}")))?;
-    apply_fields(&mut a, v, s.graph_mail)?;
+    let before = a.clone();
+    apply_fields(&mut a, v)?;
+    // A shared mailbox is its address, read with its owner's sign-in (#70): another address
+    // would be another mailbox under the same folders' ids.
+    if before.is_shared() {
+        if !a.email.trim().eq_ignore_ascii_case(before.email.trim()) {
+            return Err(fail("a shared mailbox's address can't be changed: remove it and add the other one"));
+        }
+        (a.email, a.kind, a.oauth, a.incoming, a.outgoing, a.username) = (before.email, before.kind, None, None, None, String::new());
+        a.shared_of = before.shared_of;
+    }
     if s.mailbox.accounts.iter().any(|x| x.id != id && x.email.eq_ignore_ascii_case(&a.email)) {
         return Err(fail(format!("{} is already set up", a.email)));
     }
@@ -297,10 +306,14 @@ fn edit(s: &mut Session, v: &Value) -> CmdResult {
 
 fn remove(s: &mut Session, v: &Value) -> CmdResult {
     let id = p::req_id(v, "id")?;
-    if s.mailbox.accounts.len() <= 1 {
+    // (The shared mailboxes opened through it go with it.)
+    if s.mailbox.accounts.iter().all(|a| a.id == id || a.shared_of == Some(id)) {
         return Err(fail("the last account can't be removed"));
     }
     s.mailbox.remove_account(id)?;
+    if s.mailbox.folder(s.view.folder).is_none() {
+        s.view.folder = s.mailbox.default_account().and_then(|a| s.mailbox.folder_of_kind(a.id, FolderKind::Inbox)).unwrap_or(0);
+    }
     Ok(json!({"deleted": id}))
 }
 
@@ -310,7 +323,7 @@ fn list(s: &mut Session, _: &Value) -> CmdResult {
         .accounts
         .iter()
         .map(|a| {
-            json!({"id": a.id, "name": a.name, "email": a.email, "displayName": a.display_name, "kind": a.kind, "username": a.username, "davUrl": a.dav_url, "carddavUrl": a.carddav_url, "davUsername": a.dav_username, "incoming": a.incoming, "outgoing": a.outgoing, "signature": a.signature, "replySignature": a.reply_signature(), "auth": if a.oauth.is_some() { "oauth2" } else { "password" }, "oauth": a.oauth})
+            json!({"id": a.id, "name": a.name, "email": a.email, "displayName": a.display_name, "kind": a.kind, "username": a.username, "davUrl": a.dav_url, "carddavUrl": a.carddav_url, "davUsername": a.dav_username, "incoming": a.incoming, "outgoing": a.outgoing, "signature": a.signature, "replySignature": a.reply_signature(), "auth": if a.oauth.is_some() { "oauth2" } else { "password" }, "oauth": a.oauth, "downloadInFull": a.download_in_full, "sharedOf": a.shared_of})
         })
         .collect();
     Ok(json!({"accounts": accounts, "signatures": s.mailbox.signatures}))
@@ -355,6 +368,8 @@ pub fn sync_request(s: &Session, account: Id) -> Result<SyncRequest, CmdError> {
         })
         .collect();
     let (ops, _) = remote_ops(&s.mailbox, account, MAX_OPS);
+    // What is sent goes whole: the files a message keeps on disk are read for it.
+    let outbox = s.loaded_outbox(outbox);
     Ok(SyncRequest { account: a.clone(), folders, outbox, max_per_folder: s.prefs.sync_limit, ops, ..Default::default() })
 }
 
@@ -561,9 +576,26 @@ pub fn apply_sync_part(s: &mut Session, run: &mut SyncTotals, mut result: SyncRe
     if !result.email.is_empty() && !a.email.trim().eq_ignore_ascii_case(result.email.trim()) {
         return Err(fail(format!("this Send/Receive was for another account, not for {}", a.name)));
     }
-    let (partial, stopped, progress) = (result.partial, result.stopped, result.progress.clone());
+    // A host that says only the numbers has its line made of them.
+    let progress = match (&result.step, result.progress.is_empty()) {
+        (Some(step), true) => step.line(),
+        _ => result.progress.clone(),
+    };
+    let (partial, stopped) = (result.partial, result.stopped);
     let pushed = result.pushed_count();
     let (counts, sent) = if result.has_news() { take_in_news(s, account, &mut result) } else { (Counts::default(), 0) };
+    // Looking at a folder says which of how many it is.
+    let folders = result.step.as_ref().filter(|step| step.stage == SyncStage::Checking).map(|step| (step.done, step.total));
+    let piece = Piece {
+        step: result.step.as_ref().map(sync_progress::imap_step),
+        folders,
+        new: counts.new,
+        sent,
+        problems: &result.errors,
+        last: !partial,
+        stopped,
+    };
+    s.sync_progress.take(account, piece);
     run.new += counts.new;
     run.sent += sent;
     run.removed += counts.removed;
@@ -701,6 +733,10 @@ fn file_sent(mb: &mut Mailbox, account: Id, result: &SyncResult) -> usize {
     };
     let mut moved = 0;
     for id in &result.sent {
+        // The server took it: what it answers or forwards is marked so now (#154).
+        if mb.message(*id).is_some_and(|m| m.account == account) {
+            mb.mark_answered(*id);
+        }
         if mb.message(*id).is_some_and(|m| m.account == account && m.folder == outbox) && mb.move_message(*id, sent_items).is_ok() {
             moved += 1;
         }
