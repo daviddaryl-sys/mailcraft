@@ -1,0 +1,78 @@
+name: Despres Windows release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: despres-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  WIX_VERSION: "5.0.2"
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: despres-windows-x64
+      - name: Install WiX and its dialog and shell extensions
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version $env:WIX_VERSION
+          wix extension add -g "WixToolset.UI.wixext/$env:WIX_VERSION" "WixToolset.Util.wixext/$env:WIX_VERSION"
+      - name: Test Windows engine and network protocols
+        shell: pwsh
+        run: |
+          cargo test --locked -p mailcraft-engine -p mailcraft-net --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Windows regression tests failed' }
+      - name: Build and package unsigned Windows x64
+        shell: pwsh
+        run: ./packaging/windows/package.ps1 -Arch x64
+      - name: Install, check and uninstall the MSI (x64 only)
+        shell: pwsh
+        run: |
+          $msi = (Get-Item dist/release/*.msi).FullName
+          $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/qn', '/norestart', '/l*v', "$env:RUNNER_TEMP\install.log") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\install.log" -Tail 60; throw "install failed ($($p.ExitCode))" }
+          $dir = Join-Path $env:ProgramFiles 'MailCraft'
+          foreach ($f in 'mailcraft.exe', 'mailcraft-cli.exe') { if (-not (Test-Path (Join-Path $dir $f))) { throw "$f missing in $dir" } }
+          & (Join-Path $dir 'mailcraft-cli.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'installed CLI failed' }
+          foreach ($f in 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'ATTRIBUTION.md') {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "$f missing from installed app" }
+          }
+          ./packaging/windows/smoke.ps1 -AppDir $dir
+          $entry = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object { $_.DisplayName -eq 'MailCraft' }
+          if (-not $entry) { throw 'no installed-programs entry named MailCraft' }
+          $entry | Format-List DisplayName, DisplayVersion, Publisher, PSChildName
+          if (-not (Get-ItemProperty 'HKLM:\SOFTWARE\RegisteredApplications').MailCraft) { throw 'MailCraft is not offered as a mail program' }
+          $p = Start-Process msiexec.exe -ArgumentList @('/x', $entry.PSChildName, '/qn', '/norestart') -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "uninstall failed ($($p.ExitCode))" }
+          if (Test-Path (Join-Path $dir 'mailcraft.exe')) { throw 'uninstall left mailcraft.exe behind' }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-windows-x64
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-sample-screenshot
+          path: ${{ runner.temp }}/mailcraft-windows-sample.png
+          if-no-files-found: error
+          retention-days: 7

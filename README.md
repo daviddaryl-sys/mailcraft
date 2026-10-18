@@ -4,7 +4,7 @@
 
 **Mail, calendars, contacts and tasks in one open-source, native Rust app.**
 
-MailCraft brings your email and daily planning together in a familiar desktop workspace. Organise messages, search your mail, manage calendars and keep contacts close, with a native egui interface and downloadable builds for both Apple Silicon and Intel Macs.
+MailCraft brings your email and daily planning together in a familiar desktop workspace. Organise messages, search your mail, manage calendars and keep contacts close, with a native egui interface and downloadable builds for Windows 11 PCs, Apple Silicon Macs and Intel Macs.
 
 This independently maintained edition adds Despres Connect account setup, CalDAV/CardDAV synchronization, iCloud setup improvements and fixes that protect saved credentials when server settings change. It builds on the original MailCraft project, credited below.
 
@@ -12,7 +12,7 @@ Privacy is part of the design: mail stays in your local mailbox, message content
 
 > **Early alpha (0.4.3):** useful features are available, but provider compatibility and daily-use reliability are still being tested. Back up important mail and review the [known gaps](docs/gaps.md) and [roadmap](ROADMAP.md) before relying on it.
 
-## Download for Mac
+## Downloads for Windows and Mac
 
 **Help shape MailCraft:** we are looking for our first five Mac testers. [Try it for ten minutes and leave feedback](TESTING.md), with sample mail and no real mailbox required.
 
@@ -22,6 +22,10 @@ Privacy is part of the design: mail stays in your local mailbox, message content
 |---|---|
 | Apple Silicon — M1, M2, M3, M4 or newer | [Download for Apple Silicon (arm64 ZIP)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.1/MailCraft-0.4.3-despres.1-macos-arm64.zip) |
 | Intel | [Download for Intel (x86_64 ZIP)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.1/MailCraft-0.4.3-despres.1-macos-x86_64.zip) |
+
+**Windows 11 (Intel/AMD x64):** [Download the installer (MSI)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.1/mailcraft-0.4.3-windows-x64.msi) · [Portable ZIP](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.1/mailcraft-0.4.3-windows-x64-portable.zip).
+
+Run the MSI to install, or extract the portable ZIP and open `mailcraft.exe`. Both include this edition's fixes and icon. The Windows build is unsigned, so Windows SmartScreen may show an unknown-publisher warning. These are x64 downloads; a native Windows ARM build is not included. Back up any existing app and mailbox data before upgrading. Windows build and smoke-test details are on the release page.
 
 Check **Apple menu → About This Mac** if you are unsure: “Chip” identifies Apple Silicon; “Processor” naming Intel means the Intel download. Both bundles require macOS 11 or later. Unzip the download, quit and back up both your existing MailCraft app and its mailbox data, then drag `MailCraft.app` into Applications. No Rust or Homebrew installation is required.
 
@@ -58,7 +62,7 @@ Original copyright, [MIT](LICENSE-MIT)/[Apache-2.0](LICENSE-APACHE) licences, [N
 - **Bring your files with you.** Import and export `.eml`, `.mbox`, `.ics` and `.vcf` files, with mailbox data saved locally.
 - **Automate your workflow.** Use the CLI, authenticated local JSON control channel or MCP server to run the same commands as the interface. [Automation documentation](docs/mcp.md).
 
-This edition has packaged Mac downloads above. Other platforms can be built from source; upstream binaries do not necessarily include this edition's changes. See [packaging documentation](docs/releasing.md) for the shared build tooling.
+This edition has packaged Windows x64 and Mac downloads above. Other platforms can be built from source; upstream binaries do not necessarily include this edition's changes. See [packaging documentation](docs/releasing.md) for the shared build tooling.
 
 ## What it looks like
 

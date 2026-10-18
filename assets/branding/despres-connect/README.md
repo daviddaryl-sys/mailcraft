@@ -5,6 +5,7 @@ Original ivory folded-envelope mark with a coral seal on a deep teal rounded til
 - `mailcraft-original.png`: generated master.
 - `mailcraft-github.png`: 1024px README/GitHub logo.
 - `mailcraft-window.png`: 512px embedded native window icon.
+- `mailcraft.ico`: Windows executable and installer icon, 16px through 256px.
 - `MailCraft.icns`: macOS icon containing standard and Retina sizes from 16px through 1024px.
 
-This sibling design preserves the upstream pigeon artwork and its provenance. The README uses the new logo. The native app embeds the new window icon and macOS packaging uses the new ICNS. Branded builds include the same engine fixes as DAV.4.
+This sibling design preserves the upstream pigeon artwork and its provenance. The README uses the new logo. The native app embeds the new window icon and macOS packaging uses the new ICNS. Windows embeds the ICO in the executable and installer and uses the same window PNG. Branded builds include the same engine fixes as DAV.4.
