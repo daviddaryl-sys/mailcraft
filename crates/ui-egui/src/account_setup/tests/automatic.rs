@@ -103,36 +103,46 @@ fn email_and_one_password_start_mail_calendar_and_contacts_together() {
     assert!(!serde_json::to_string(&h.state().session.mailbox).unwrap().contains(TYPED));
 }
 #[test]
-fn badminton_migrated_profile_connects_all_services_without_dns_or_manual_settings() {
-    for dark in [false, true] {
-        let mut a = app(dark);
-        a.execute("ui.theme", json!({"value": if dark { "dark" } else { "light" }})).unwrap();
+fn client_domains_require_discovery_and_use_its_settings() {
+    for domain in ["despresai.com", "BADMINTONSOLDIERS.CLUB", "new-tenant.example.org"] {
+        let mut a = app(false);
         let asked = discoveries(&mut a, found());
-        let tried = checks(&mut a, Some(Ok(())));
-        let mail = syncs(&mut a);
-        let dav = dav_jobs(&mut a);
+        checks(&mut a, Some(Ok(())));
         let mut h = open(a, json!({}));
-        connect(&mut h, "setup-check@BADMINTONSOLDIERS.CLUB");
+        connect(&mut h, &format!("setup-check@{domain}"));
+        assert_eq!(*asked.lock().unwrap(), [domain.to_ascii_lowercase()]);
         assert_eq!(page(&h), Some(Page::Password));
-        assert!(wizard(&h).is_some_and(|w| !w.guessed && !w.settings_open));
-        assert!(says(&h, "Connects mail, calendar and contacts together"));
-        assert!(asked.lock().unwrap().is_empty());
+        assert_eq!(wizard(&h).unwrap().incoming.host, "imap.example.org");
         type_password(&mut h);
         press(&mut h, Key::Enter);
         assert_eq!(page(&h), Some(Page::Done));
-        let account = h.state().session.mailbox.accounts.iter().find(|a| a.email.eq_ignore_ascii_case("setup-check@badmintonsoldiers.club")).unwrap();
-        assert_eq!(account.incoming, Some(Server { host: "outlook.despresai.com".into(), port: 9933, security: Security::Tls }));
-        assert_eq!(account.outgoing, Some(Server { host: "mail.badmintonsoldiers.club".into(), port: 587, security: Security::StartTls }));
-        assert_eq!(account.dav_url, "https://outlook.despresai.com/dav/");
-        assert_eq!(account.dav_login(), account.username);
-        let checked = &tried.lock().unwrap()[0].0;
-        assert_eq!(
-            (&checked.incoming, &checked.outgoing, &checked.dav_url, &checked.username),
-            (&account.incoming, &account.outgoing, &account.dav_url, &account.username)
-        );
-        assert_eq!(mail.lock().unwrap()[0].2, TYPED);
-        assert_eq!(*dav.lock().unwrap(), [(account.id, TYPED.into(), true)]);
-        assert!(!serde_json::to_string(&h.state().session.mailbox).unwrap().contains(TYPED));
+        let account = &h.state().session.mailbox.accounts[0];
+        assert_eq!(account.incoming.as_ref().unwrap().port, 9993);
+        assert_eq!(account.outgoing.as_ref().unwrap().host, "smtp.example.org");
+        assert_eq!(account.dav_url, "https://group.example.org/dav/");
+    }
+}
+
+#[test]
+fn unconfirmed_client_domains_keep_manual_setup_available() {
+    for domain in ["despresai.com", "badmintonsoldiers.club", "new-tenant.example.org"] {
+        let mut a = app(false);
+        let asked = discoveries(&mut a, provider::Discovery::default());
+        checks(&mut a, Some(Ok(())));
+        let mut h = open(a, json!({}));
+        connect(&mut h, &format!("setup-check@{domain}"));
+        assert_eq!(*asked.lock().unwrap(), [domain]);
+        assert_eq!(page(&h), Some(Page::Password));
+        assert!(wizard(&h).is_some_and(|w| w.guessed && w.settings_open && w.dav_url.is_empty()));
+        wizard_mut(&mut h).incoming.host = "manual.example.org".into();
+        wizard_mut(&mut h).outgoing.host = "relay.example.org".into();
+        type_password(&mut h);
+        press(&mut h, Key::Enter);
+        assert_eq!(page(&h), Some(Page::Done));
+        let account = &h.state().session.mailbox.accounts[0];
+        assert_eq!(account.incoming.as_ref().unwrap().host, "manual.example.org");
+        assert_eq!(account.outgoing.as_ref().unwrap().host, "relay.example.org");
+        assert!(account.dav_url.is_empty());
     }
 }
 
@@ -170,22 +180,6 @@ fn a_confirmed_despreconnect_tenant_uses_vm_settings_before_legacy_mx() {
 }
 
 #[test]
-fn despres_profile_bypasses_legacy_mx_and_never_selects_plesk_imap() {
-    let mut a = app(false);
-    let asked = discoveries(&mut a, found());
-    let mut w = AccountSetup::new(&a, &json!({"email":"setup-check@despresai.com"}));
-    w.act(&mut a, Action::Go);
-    assert_eq!(w.page, Page::Password);
-    assert_eq!(w.service, "Despres Connect");
-    assert_eq!(w.account().unwrap().incoming.unwrap().port, 9933);
-    assert_eq!(w.dav_url, "https://outlook.despresai.com/dav/");
-    assert!(asked.lock().unwrap().is_empty());
-    w.act(&mut a, Action::Back);
-    w.email = "setup-check@gmail.com".into();
-    w.act(&mut a, Action::Go);
-    assert!(w.dav_url.is_empty());
-}
-#[test]
 fn cancelling_discovery_and_reopening_an_existing_account_start_nothing() {
     let mut a = app(false);
     let (tx, rx) = mpsc::channel();
@@ -222,14 +216,18 @@ fn dns_does_not_replace_a_known_oauth_provider_or_silently_claim_missing_service
 #[test]
 fn new_despres_default_leaves_existing_account_endpoints_unchanged() {
     let mut a = app(false);
-    a.execute("account.add", json!({"email":"existing@despresai.com", "davUrl":"https://outlook-test.computerhelpexpert.co.uk/dav/"})).unwrap();
+    a.execute("account.add", json!({"email":"existing@example.org", "davUrl":"https://old.example.org/dav/"})).unwrap();
     let before = serde_json::to_value(&a.session.mailbox.accounts).unwrap();
-    let mut w = AccountSetup::new(&a, &json!({"email":"new@despresai.com"}));
+    let mut answer = found();
+    answer.despres_connect = true;
+    discoveries(&mut a, answer);
+    let mut w = AccountSetup::new(&a, &json!({"email":"new@example.org"}));
     w.act(&mut a, Action::Go);
+    w.poll(&mut a);
     assert_eq!(w.dav_url, "https://outlook.despresai.com/dav/");
     assert!(w.carddav_url.is_empty());
     assert_eq!(serde_json::to_value(&a.session.mailbox.accounts).unwrap(), before);
-    let mut existing = AccountSetup::new(&a, &json!({"email":"existing@despresai.com"}));
+    let mut existing = AccountSetup::new(&a, &json!({"email":"existing@example.org"}));
     existing.act(&mut a, Action::Go);
     assert!(existing.error.contains("already connected"));
     assert_eq!(serde_json::to_value(&a.session.mailbox.accounts).unwrap(), before);
