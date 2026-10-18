@@ -27,6 +27,21 @@ Privacy is part of the design: mail stays in your local mailbox, message content
 
 Run the MSI to install, or extract the portable ZIP and open `mailcraft.exe`. Both include this edition's fixes and icon. The Windows build is unsigned, so Windows SmartScreen may show an unknown-publisher warning. These are x64 downloads; a native Windows ARM build is not included. Back up any existing app and mailbox data before upgrading. Windows build and smoke-test details are on the release page.
 
+### Windows 11: unknown publisher warning
+
+These early-alpha Windows builds are unsigned. If you downloaded MailCraft from [this repository's release page](https://github.com/daviddaryl-sys/mailcraft/releases/tag/v0.4.3-despres.1) and trust the source:
+
+1. Open `mailcraft-0.4.3-windows-x64.msi`.
+2. If **Windows protected your PC** appears, select **More info → Run anyway**.
+3. If Windows asks whether to allow changes and shows **Unknown publisher**, check that it names the MailCraft installer, then select **Yes**.
+4. Complete installation and open **MailCraft** from Start.
+
+For the portable ZIP, extract it first and open `mailcraft.exe`; the same SmartScreen warning may appear.
+
+If **Run anyway** is missing, or the warning mentions malware or **Smart App Control**, stop and check the exact message rather than switching off protection. Managed PCs may require an administrator's approval. Keep Microsoft Defender, SmartScreen and Smart App Control enabled. See [Microsoft's explanation of SmartScreen warnings](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation) and [Smart App Control](https://support.microsoft.com/en-us/windows/security/threat-malware-protection/smart-app-control-frequently-asked-questions).
+
+### Mac installation
+
 Check **Apple menu → About This Mac** if you are unsure: “Chip” identifies Apple Silicon; “Processor” naming Intel means the Intel download. Both bundles require macOS 11 or later. Unzip the download, quit and back up both your existing MailCraft app and its mailbox data, then drag `MailCraft.app` into Applications. No Rust or Homebrew installation is required.
 
 These are early-alpha builds with local ad-hoc signatures, **not Apple-notarized**. macOS may require approval in **System Settings → Privacy & Security**; managed Macs may block them. Downloads contain the app and its licences, with no saved accounts, passwords or private mailbox data. Configure your own accounts after installation. [Checksums](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.1/SHA256SUMS.txt) and verification details are on the release page. Intel's version check passed under Rosetta; physical Intel hardware and older macOS versions have not been tested.
