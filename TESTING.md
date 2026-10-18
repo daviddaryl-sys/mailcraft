@@ -6,11 +6,11 @@ MailCraft is an open-source mail, calendar, contacts and tasks app written in Ru
 
 ## 1. Download and install
 
-- [Apple Silicon: M1 or newer](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.3.0-brand2-macos/MailCraft-0.3.0-brand2-macos-arm64.zip)
-- [Intel Mac](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.3.0-brand2-macos/MailCraft-0.3.0-brand2-macos-x86_64.zip)
-- [Release notes and checksums](https://github.com/daviddaryl-sys/mailcraft/releases/tag/v0.3.0-brand2-macos)
+- [Apple Silicon: M1 or newer](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.1/MailCraft-0.4.3-despres.1-macos-arm64.zip)
+- [Intel Mac](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.1/MailCraft-0.4.3-despres.1-macos-x86_64.zip)
+- [Release notes and checksums](https://github.com/daviddaryl-sys/mailcraft/releases/tag/v0.4.3-despres.1)
 
-Both bundles declare macOS 11 or later; older macOS versions and physical Intel hardware have not been runtime-tested. Check Apple menu > About This Mac for your chip/processor. Unzip the download and drag MailCraft.app into Applications. Quit and back up any previous version first.
+Both bundles declare macOS 11 or later; older macOS versions and physical Intel hardware have not been runtime-tested. Check Apple menu > About This Mac for your chip/processor. Unzip the download and drag MailCraft.app into Applications. Quit and back up both the previous app and its mailbox data first. Version 0.4.3 upgrades the mailbox to storage format 3; restoring an older app also requires restoring its matching data backup.
 
 These early-alpha builds are not Apple-notarized. If macOS cannot verify the developer, first attempt to open MailCraft, dismiss the warning, then use System Settings > Privacy & Security > Open Anyway. Older macOS versions use System Preferences > Security & Privacy > General. Only approve the app if you trust its source. [Apple's instructions](https://support.apple.com/en-ie/102445).
 

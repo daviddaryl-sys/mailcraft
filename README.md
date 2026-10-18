@@ -10,22 +10,22 @@ This independently maintained edition adds Despres Connect account setup, CalDAV
 
 Privacy is part of the design: mail stays in your local mailbox, message content runs no scripts, remote pictures load only when permitted, and remembered passwords use the operating system's credential store. Mail sync connects to your configured provider. Developers can also build the Rust code for other desktop platforms or WebAssembly, and automate actions through the CLI, local control channel or MCP server. The browser build imports files; it does not connect directly to mail servers.
 
-> **Early alpha (0.3):** useful features are available, but provider compatibility and daily-use reliability are still being tested. Back up important mail and review the [known gaps](docs/gaps.md) and [roadmap](ROADMAP.md) before relying on it.
+> **Early alpha (0.4.3):** useful features are available, but provider compatibility and daily-use reliability are still being tested. Back up important mail and review the [known gaps](docs/gaps.md) and [roadmap](ROADMAP.md) before relying on it.
 
 ## Download for Mac
 
 **Help shape MailCraft:** we are looking for our first five Mac testers. [Try it for ten minutes and leave feedback](TESTING.md), with sample mail and no real mailbox required.
 
-**[Latest packaged build: MailCraft 0.3.0 with the new icon](https://github.com/daviddaryl-sys/mailcraft/releases/tag/v0.3.0-brand2-macos)**
+**[Latest packaged build: MailCraft 0.4.3 — upstream improvements and our icon](https://github.com/daviddaryl-sys/mailcraft/releases/tag/v0.4.3-despres.1)**
 
 | Your Mac | Download |
 |---|---|
-| Apple Silicon — M1, M2, M3, M4 or newer | [Download for Apple Silicon (arm64 ZIP)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.3.0-brand2-macos/MailCraft-0.3.0-brand2-macos-arm64.zip) |
-| Intel | [Download for Intel (x86_64 ZIP)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.3.0-brand2-macos/MailCraft-0.3.0-brand2-macos-x86_64.zip) |
+| Apple Silicon — M1, M2, M3, M4 or newer | [Download for Apple Silicon (arm64 ZIP)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.1/MailCraft-0.4.3-despres.1-macos-arm64.zip) |
+| Intel | [Download for Intel (x86_64 ZIP)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.1/MailCraft-0.4.3-despres.1-macos-x86_64.zip) |
 
-Check **Apple menu → About This Mac** if you are unsure: “Chip” identifies Apple Silicon; “Processor” naming Intel means the Intel download. Both bundles require macOS 11 or later. Unzip the download, quit and back up any existing MailCraft app, then drag `MailCraft.app` into Applications. No Rust or Homebrew installation is required.
+Check **Apple menu → About This Mac** if you are unsure: “Chip” identifies Apple Silicon; “Processor” naming Intel means the Intel download. Both bundles require macOS 11 or later. Unzip the download, quit and back up both your existing MailCraft app and its mailbox data, then drag `MailCraft.app` into Applications. No Rust or Homebrew installation is required.
 
-These are early-alpha builds with local ad-hoc signatures, **not Apple-notarized**. macOS may require approval in **System Settings → Privacy & Security**; managed Macs may block them. Downloads contain the app and its licences, with no saved accounts, passwords or private mailbox data. Configure your own accounts after installation. [Checksums](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.3.0-brand2-macos/SHA256SUMS.txt) and verification details are on the release page. Intel's version check passed under Rosetta; physical Intel hardware and older macOS versions have not been tested.
+These are early-alpha builds with local ad-hoc signatures, **not Apple-notarized**. macOS may require approval in **System Settings → Privacy & Security**; managed Macs may block them. Downloads contain the app and its licences, with no saved accounts, passwords or private mailbox data. Configure your own accounts after installation. [Checksums](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.1/SHA256SUMS.txt) and verification details are on the release page. Intel's version check passed under Rosetta; physical Intel hardware and older macOS versions have not been tested.
 
 ## What this version improves
 
@@ -36,7 +36,9 @@ This edition builds on the original MailCraft foundation with work focused on ac
 - **iCloud setup:** separate Apple calendar/contact service roots, constrained Apple server discovery, app-specific-password guidance, advertised IMAP SASL PLAIN support, and a fix for blocked account-dialog input. [iCloud details and verification limits](docs/icloud-setup.md).
 - **Credential protection:** changing an account's mail, calendar or separate contacts server clears its saved password/sign-in, including the OS credential-store entry, so a server change cannot silently carry remembered credentials to another endpoint.
 
-The published DAV.4 source passed all six repository CI steps, including **1,746 tests** and the WASM build check. This integration branch also incorporates upstream 0.4.3 development work, including agent permissions, privacy-safe logging, Graph mail, improved storage, search and character decoding. Its builds are undergoing separate migration and regression verification; the published downloads below remain the verified 0.3.0 builds. The Apple Silicon build has been used with three configured accounts; this is not a claim of compatibility with every provider or Mac. This remains an early-alpha project: review [known gaps](docs/gaps.md) before relying on it for important mail.
+The 0.4.3 release integrates upstream improvements through `77a3253`: Microsoft Graph mail, agent permissions, privacy-safe logging, storage and search improvements, and better character decoding, while retaining this edition's fixes and branding. All seven repository CI checks passed: **2,189 tests passed, 9 ignored**, plus formatting, clippy, asset attribution, layering, WASM and dependency-policy checks. Migration was verified offline against backed-up mailbox copies, and the Apple Silicon app was checked with three configured accounts. This is not a claim of compatibility with every provider or Mac.
+
+**Upgrading from 0.3?** Back up the app and its mailbox data before launching 0.4.3. It upgrades the mailbox to storage format 3; an older app needs the matching older data backup to roll back. Review the [known gaps](docs/gaps.md) before relying on this early-alpha software for important mail.
 
 ## Original project and credit
 
@@ -104,7 +106,7 @@ cd apps/mailcraft-web && trunk serve
 
 and open http://127.0.0.1:8772/ (`?sample` starts from the sample mailbox, `?empty` from an empty one).
 
-**Everything CI runs:** `cargo xtask ci` (formatting, clippy with warnings as errors, the tests, asset attribution, crate layering, the wasm build).
+**Everything CI runs:** `cargo xtask ci` (formatting, clippy with warnings as errors, the tests, asset attribution, crate layering, the wasm build, and dependency advisories, licences and sources).
 
 ## Driving it from an agent
 
