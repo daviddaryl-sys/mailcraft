@@ -2,6 +2,11 @@ name: Despres Windows release
 
 on:
   workflow_dispatch:
+    inputs:
+      run_protocol_tests:
+        description: Run Windows engine and network tests (leave on unless the same Rust source was already tested)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -30,12 +35,15 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: despres-windows-x64
+          cache-on-failure: true
+          cache-workspace-crates: true
       - name: Install WiX and its dialog and shell extensions
         shell: pwsh
         run: |
           dotnet tool install --global wix --version $env:WIX_VERSION
           wix extension add -g "WixToolset.UI.wixext/$env:WIX_VERSION" "WixToolset.Util.wixext/$env:WIX_VERSION"
       - name: Test Windows engine and network protocols
+        if: inputs.run_protocol_tests
         shell: pwsh
         run: |
           cargo test --locked -p mailcraft-engine -p mailcraft-net --target x86_64-pc-windows-msvc
@@ -75,4 +83,14 @@ jobs:
           name: windows-sample-screenshot
           path: ${{ runner.temp }}/mailcraft-windows-sample.png
           if-no-files-found: error
+          retention-days: 7
+      - name: Retain binaries for packaging diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-build-diagnostics
+          path: |
+            target/x86_64-pc-windows-msvc/release/mailcraft.exe
+            target/x86_64-pc-windows-msvc/release/mailcraft-cli.exe
+          if-no-files-found: ignore
           retention-days: 7

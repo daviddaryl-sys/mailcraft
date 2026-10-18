@@ -66,11 +66,17 @@
 
   <Fragment>
     <ComponentGroup Id="MailcraftFiles" Directory="INSTALLFOLDER">
-      <Component Id="MailcraftLicences" Guid="*">
+      <Component Id="MailcraftLicenceMit" Guid="*">
         <File Id="MailcraftMit" Source="$(var.BinDir)\LICENSE-MIT" KeyPath="yes" />
-        <File Id="MailcraftApache" Source="$(var.BinDir)\LICENSE-APACHE" />
-        <File Id="MailcraftNotice" Source="$(var.BinDir)\NOTICE" />
-        <File Id="MailcraftAttribution" Source="$(var.BinDir)\ATTRIBUTION.md" />
+      </Component>
+      <Component Id="MailcraftLicenceApache" Guid="*">
+        <File Id="MailcraftApache" Source="$(var.BinDir)\LICENSE-APACHE" KeyPath="yes" />
+      </Component>
+      <Component Id="MailcraftLicenceNotice" Guid="*">
+        <File Id="MailcraftNotice" Source="$(var.BinDir)\NOTICE" KeyPath="yes" />
+      </Component>
+      <Component Id="MailcraftLicenceAttribution" Guid="*">
+        <File Id="MailcraftAttribution" Source="$(var.BinDir)\ATTRIBUTION.md" KeyPath="yes" />
       </Component>
       <Component Id="MailcraftApp" Guid="6883EF8E-7160-4B89-85C5-0DB6E7264E61">
         <File Id="MailcraftExe" Source="$(var.BinDir)\mailcraft.exe" KeyPath="yes">
