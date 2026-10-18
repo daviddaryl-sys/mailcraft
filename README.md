@@ -14,6 +14,8 @@ Privacy is part of the design: mail stays in your local mailbox, message content
 
 ## Download for Mac
 
+**Help shape MailCraft:** we are looking for our first five Mac testers. [Try it for ten minutes and leave feedback](TESTING.md), with sample mail and no real mailbox required.
+
 **[Latest packaged build: MailCraft 0.3.0 with the new icon](https://github.com/daviddaryl-sys/mailcraft/releases/tag/v0.3.0-brand2-macos)**
 
 | Your Mac | Download |

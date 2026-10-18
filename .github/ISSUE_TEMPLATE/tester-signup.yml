@@ -1,90 +1,56 @@
-name: Sign up to test
-description: Use MailCraft on your own mail and tell us what goes wrong. For the alpha now and the beta later.
-title: "Tester: <your GitHub name>"
+name: Mac tester feedback
+description: Tell us how your first ten minutes with MailCraft went.
+title: "Mac trial: "
 labels: ["tester"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thank you. This issue is **public**: don't write your email address, your organisation's name or anything from your mail here. Your GitHub name is enough; we'll reach you here.
-
-        **Alpha** is now: the builds on the [Releases page](https://github.com/UCS-Care-Group/mailcraft/releases), unsigned, and they can still get things wrong. What you do in MailCraft (moves, deletions, read marks) reaches your server. Keep Outlook or Outlook on the web to hand, and don't test on a mailbox you can't afford to have disturbed.
-
-        **Beta** is later: at least 5 testers, each on a Microsoft account, using MailCraft on 14 working days (Monday to Friday) on at least 2 devices, with signed builds. See [ROADMAP.md](https://github.com/UCS-Care-Group/mailcraft/blob/main/ROADMAP.md).
-  - type: checkboxes
-    id: phase
-    attributes:
-      label: When can you test?
-      options:
-        - label: Alpha, now
-        - label: Beta, when it starts (14 working days, about three weeks)
-  - type: checkboxes
-    id: platforms
-    attributes:
-      label: Where would you run it?
-      description: Tick every one you could use daily.
-      options:
-        - label: Windows x64
-        - label: Windows ARM64
-        - label: macOS, Apple silicon
-        - label: macOS, Intel
-        - label: Linux x86_64
-        - label: Linux ARM64
-        - label: FreeBSD
-  - type: input
-    id: linux
-    attributes:
-      label: If Linux, which distribution and desktop?
-      placeholder: e.g. Ubuntu 24.04, GNOME
+        Thanks for trying MailCraft. See the [ten-minute trial guide](https://github.com/daviddaryl-sys/mailcraft/blob/main/TESTING.md) for downloads and installation help.
+        This issue is public. Do not include passwords, tokens, account addresses, private mail or unredacted screenshots. An interface-only trial is welcome; connecting an account is optional.
   - type: dropdown
-    id: account
+    id: chip
     attributes:
-      label: Which kind of mail account?
-      description: Beta is for Microsoft accounts. Other accounts are welcome in the alpha.
-      multiple: true
+      label: Mac type
       options:
-        - Personal Microsoft account (Outlook.com, Hotmail, Live)
-        - Work or school Microsoft 365 account
-        - Other (Gmail, Fastmail, an IMAP server)
+        - Apple Silicon (M1 or newer)
+        - Intel
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: From Apple menu > About This Mac
     validations:
       required: true
   - type: dropdown
-    id: admin
+    id: launch
     attributes:
-      label: For a work or school account, can you approve apps for your organisation?
-      description: Until MailCraft's registration is publisher-verified, most organisations need an administrator to approve it once.
+      label: How far did you get?
       options:
-        - Not a work or school account
-        - Yes, I'm an administrator
-        - No, but I can ask one
-        - No, and my organisation won't approve new apps
-  - type: dropdown
-    id: size
-    attributes:
-      label: Roughly how much mail?
-      options:
-        - Under 10,000 messages
-        - 10,000 to 50,000
-        - 50,000 to 200,000
-        - Over 200,000
-        - Don't know
-  - type: dropdown
-    id: devices
-    attributes:
-      label: How many devices could you use it on?
-      options:
-        - "1"
-        - "2"
-        - 3 or more
+        - Downloaded but could not install
+        - Installed but could not open
+        - Opened and explored the interface or sample
+        - Connected a dedicated test mailbox
+    validations:
+      required: true
   - type: textarea
-    id: use
+    id: experience
     attributes:
-      label: What do you use mail for most? (optional)
-      description: e.g. lots of shared mailboxes, many meetings, many folders and rules. No names, please.
+      label: What worked, and where did you get stuck?
+      description: Include the step you tried and the result. Remove any private details.
+    validations:
+      required: true
+  - type: textarea
+    id: improvement
+    attributes:
+      label: What one change would make you try it again?
   - type: checkboxes
-    id: agree
+    id: privacy
     attributes:
-      label: Understood
+      label: Before posting
       options:
-        - label: I'll report problems as GitHub issues, and I've put nothing private in this one.
+        - label: This report contains no passwords, tokens, private messages or account addresses.
           required: true
