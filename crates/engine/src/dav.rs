@@ -2,6 +2,7 @@
 use crate::Session;
 use mailcraft_model::dav::{Download, Resource};
 use mailcraft_model::{Calendar, Contact, Event, Origin, Rgb};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 fn same_contact(a: &Contact, b: &Contact) -> bool {
@@ -32,6 +33,22 @@ pub fn apply(session: &mut Session, mut download: Download) -> Vec<String> {
         return Vec::new();
     }
     let mut conflicts = Vec::new();
+    // Earlier batches from this same job already allocated local ids. Reuse their checkpoints
+    // in the final reply, including if the owner edited or deleted an imported item meanwhile.
+    let mut known: HashSet<_> = download.before.iter().map(|r| r.href.clone()).collect();
+    let incoming: HashMap<_, _> = download.resources.iter().enumerate().map(|(i, r)| (r.href.clone(), i)).collect();
+    for checkpoint in session.mailbox.dav_resources.iter().filter(|r| r.account == download.account) {
+        if !known.insert(checkpoint.href.clone()) {
+            continue;
+        }
+        if let Some(resource) = incoming.get(&checkpoint.href).and_then(|i| download.resources.get_mut(*i)) {
+            if resource.etag != checkpoint.etag || resource.raw != checkpoint.raw {
+                conflicts.push("DAV checkpoint changed during import; local copy retained for retry".into());
+            }
+            *resource = checkpoint.clone();
+        }
+        download.before.push(checkpoint.clone());
+    }
     let saved = session.mailbox.clone();
     let mailbox = &mut session.mailbox;
     for collection in &download.collections {

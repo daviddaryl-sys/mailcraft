@@ -1,8 +1,10 @@
 # MailCraft vs Outlook: the assessment
 
+DAV.5 (2026-10-19): first DAV imports display and save verified batches, retain checkpoints and concurrent local edits across the final reply, show persistent progress counts, and back off automatic retries after failures.
+
 SEC.3 (2026-10-18): credential regression tests cover incoming mail and SMTP changes, and adding DAV with shared or separate CardDAV endpoints, including clearing remembered OAuth refresh tokens and refusing to reuse access tokens after a server edit or restart. Display-name edits and refused CardDAV edits preserve credentials. DAV cases switch OAuth accounts to the supported password authentication before checking that their old tokens are cleared.
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-18 · **Change:** minor (AUTO.4: client domains require discovery; SEC.3: regression coverage for SMTP/CardDAV credential clearing and remembered sign-ins; DAV.4: branded default for new Despres Connect accounts) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-19 · **Change:** minor (DAV.5: progressive first import and retry backoff; AUTO.4: client domains require discovery; SEC.3: regression coverage for SMTP/CardDAV credential clearing and remembered sign-ins; DAV.4: branded default for new Despres Connect accounts) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
 
 New account default (DAV.4, 2026-10-17): Despres Connect uses `https://outlook.despresai.com/dav/` for calendar and contacts. Existing accounts retain their saved endpoints.
 
@@ -101,3 +103,4 @@ pictures and basic layout), #7 (at least rich replies), #9 and #11.
 
 | 2026-10-17 | minor | ICLOUD.3: dialog input remains reachable after an outside click |
 | 2026-10-18 | minor | SEC.3: credential-clearing regression coverage for all four server settings, remembered sign-ins and restart |
+| 2026-10-19 | minor | DAV.5: progressive first import, saved checkpoints, progress and retry backoff |

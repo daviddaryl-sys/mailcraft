@@ -1020,7 +1020,22 @@ fn services(file_dialog: file_dialogs::Hook, ctx: egui::Context, kept_pictures: 
             background(&sign_in_ctx, "sign-in", move || sign_in(&ctx, request))
         })),
         graph: Some(Box::new(move |request| background(&graph_ctx, "microsoft graph", move || graph(request)))),
-        dav: Some(Box::new(move |request| background(&dav_ctx, "calendar and contacts", move || mailcraft_net::dav::sync(request)))),
+        dav: Some(Box::new(move |request| {
+            let (tx, rx) = std::sync::mpsc::sync_channel(2);
+            let wake = dav_ctx.clone();
+            let spawned = std::thread::Builder::new().name("calendar and contacts".into()).spawn(move || {
+                let result = mailcraft_net::dav::sync_with_progress(request, |batch| {
+                    let _ = tx.send(batch);
+                    wake.request_repaint();
+                });
+                let _ = tx.send(result);
+                wake.request_repaint();
+            });
+            if let Err(error) = spawned {
+                log::error!("couldn't start calendar and contacts: {error}");
+            }
+            rx
+        })),
         // Messages of a Microsoft account fetched whole, a few at a time (R3.2).
         graph_fetch: Some(Box::new(move |job: mailcraft_ui_egui::graph_fetch::GraphFetchJob| {
             background(&fetch_ctx, "message download", move || mailcraft_net::graph::fetch_messages(&job.access, &job.request, &job.cancel))
