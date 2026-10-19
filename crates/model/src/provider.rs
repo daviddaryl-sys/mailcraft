@@ -112,15 +112,6 @@ pub fn by_domain(domain: &str) -> Option<Preset> {
     }
     let (tls, starttls) = (Security::Tls, Security::StartTls);
     Some(match domain.as_str() {
-        "despresai.com" | "badmintonsoldiers.club" => Preset {
-            service: "Despres Connect",
-            oauth: None,
-            incoming: server("outlook.despresai.com", 9933, tls),
-            outgoing: server(&format!("mail.{domain}"), 587, starttls),
-            dav_url: "https://outlook.despresai.com/dav/",
-            carddav_url: "",
-            note: "Mail, calendar and contacts use your Despres Connect sign-in.",
-        },
         "gmail.com" | "googlemail.com" => with_password("Gmail", "imap.gmail.com", ("smtp.gmail.com", 465, tls), APP_PASSWORD),
         "icloud.com" | "me.com" | "mac.com" => icloud(),
         "fastmail.com" | "fastmail.fm" => with_password("Fastmail", "imap.fastmail.com", ("smtp.fastmail.com", 465, tls), APP_PASSWORD),
@@ -183,7 +174,18 @@ pub fn by_name(name: &str) -> Option<Preset> {
         "fastmail" => by_domain("fastmail.com"),
         "aol" => by_domain("aol.com"),
         "zoho" => by_domain("zoho.com"),
-        "despres" | "despresconnect" => by_domain("despresai.com"),
+        // Selected explicitly or after tenant confirmation; never inferred from a client domain.
+        "despres" | "despresconnect" => {
+            let mut p = with_password(
+                "Despres Connect",
+                "outlook.despresai.com",
+                ("mail.despresai.com", 587, Security::StartTls),
+                "Mail, calendar and contacts use your Despres Connect sign-in.",
+            );
+            p.incoming.port = 9933;
+            p.dav_url = "https://outlook.despresai.com/dav/";
+            Some(p)
+        }
         _ => None,
     }
 }
@@ -220,7 +222,19 @@ mod tests {
         assert_eq!(by_domain("yahoo.co.uk").unwrap().service, "Yahoo");
         assert_eq!(by_domain("gmx.net").unwrap().outgoing, server("mail.gmx.net", 587, Security::StartTls));
         // Someone else's domain that merely starts like one of them, and things that aren't domains.
-        for domain in ["live.somecompany.example", "outlook.example.org", "hotmail", "lumen.example", "", "a b.com", "evil/../x.com"] {
+        for domain in [
+            "despresai.com",
+            "badmintonsoldiers.club",
+            "BADMINTONSOLDIERS.CLUB",
+            "new-tenant.example.org",
+            "live.somecompany.example",
+            "outlook.example.org",
+            "hotmail",
+            "lumen.example",
+            "",
+            "a b.com",
+            "evil/../x.com",
+        ] {
             assert_eq!(by_domain(domain), None, "{domain}");
         }
     }
@@ -250,6 +264,10 @@ mod tests {
         assert_eq!(by_name("Outlook.com").unwrap().service, "Outlook.com");
         assert_eq!(by_name("google").unwrap().incoming.host, "imap.gmail.com");
         assert_eq!(by_name("iCloud").unwrap().service, "iCloud");
+        let p = by_name("Despres Connect").unwrap();
+        assert_eq!(p.incoming, server("outlook.despresai.com", 9933, Security::Tls));
+        assert_eq!(p.outgoing, server("mail.despresai.com", 587, Security::StartTls));
+        assert_eq!(p.dav_url, "https://outlook.despresai.com/dav/");
         assert_eq!(by_name("nobody"), None);
         assert_eq!(by_name(""), None);
     }

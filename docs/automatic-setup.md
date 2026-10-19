@@ -1,16 +1,9 @@
 # Automatic account setup in the local MailCraft build
 
 Add Account asks for an email address, then a password or the provider's own sign-in. A known
-provider's settings take priority over DNS guesses. Despres Connect has a local profile for
-`despresai.com` and `badmintonsoldiers.club`: encrypted VM IMAP at
-`outlook.despresai.com:9933`, each domain's existing `mail.<domain>:587` SMTP relay with mandatory
-STARTTLS, and the shared `https://outlook.despresai.com/dav/` endpoint for both
-calendar and contacts. It never selects the retained Plesk IMAP service on port 993.
-For Badminton Soldiers, enter the full email address and current migrated-mailbox password;
-no server fields or separate DAV sign-in are required. The known profile takes priority over the
-domain's legacy MX records. Matching is case-insensitive and limited to these exact domains.
-The mailbox must have IMAP, SMTP and DAV access enabled on the VM. An already connected
-account is preserved; this update does not remove it, duplicate it or change its settings.
+provider's settings take priority over DNS guesses. Client domains have no built-in presets:
+Despres Connect setup requires confirmation from its domain-discovery service. An already
+connected account is preserved; this update does not duplicate it or change its settings.
 
 One password is handed in memory to the mail authentication check and read-only DAV collection
 discovery. Both checks must succeed when DAV is configured. No message, test appointment or
@@ -19,7 +12,7 @@ preference, and mail plus an initial read-only calendar/contact download start a
 The completion screen shows DAV progress/errors separately from mail. An existing account is
 detected before sign-in, rather than duplicated. The current account needs no removal or re-add.
 
-For any other domain, MailCraft first asks the fixed HTTPS endpoint
+For domains without a known public-provider preset, MailCraft first asks the fixed HTTPS endpoint
 `https://outlook.despresai.com/.well-known/mailcraft?domain=<domain>`. It sends only the domain:
 no mailbox local part, password, cookie or authorization header. The API performs an exact,
 read-only check against active VM domains; it does not publish a domain list or any users.
@@ -32,7 +25,7 @@ domains do not receive this profile. Account protocol access and outbound relay 
 remain part of normal server onboarding. A domain match is not a mailbox authentication check:
 mail and read-only DAV authentication must still succeed before adding an account.
 
-Existing exact profiles for the two already verified migrated domains are retained. Known public
+Known public
 providers (including Microsoft and iCloud) keep their existing setup and are not queried here.
 If Despres Connect does not confirm an unfamiliar domain, its normal provider/DNS/manual flow
 continues. Generic DNS lookups use domain-only DNS-over-HTTPS for MX and encrypted service records:
@@ -62,3 +55,5 @@ Primary references: [RFC 6764](https://www.rfc-editor.org/rfc/rfc6764.html) (DAV
 [RFC 8314](https://www.rfc-editor.org/rfc/rfc8314.html) (encrypted mail services).
 
 DAV.4 (2026-10-17): the branded DAV default applies only during new account setup. Saved accounts and their credentials are not migrated or rewritten.
+
+AUTO.4 (2026-10-18): removed client-domain presets; all tenant domains use discovery, with normal provider/DNS/manual setup when unconfirmed.

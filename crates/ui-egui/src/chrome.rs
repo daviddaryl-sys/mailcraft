@@ -304,7 +304,10 @@ pub fn status_bar(app: &mut MailApp, ui: &mut Ui) {
                         st(ui, &n(open, "{n} open task", "{n} open tasks"), t.text_dim);
                     }
                 }
-                if let Some((msg, at)) = &app.status_msg
+                if app.dav.rx.is_some() && matches!(app.session.view.module, Module::Calendar | Module::People) {
+                    let shown = st_most(ui, &app.dav.status, t.accent_text, full_w * STATUS_MSG_SHARE);
+                    app.hit.add("statusMessage", 0, shown.rect);
+                } else if let Some((msg, at)) = &app.status_msg
                     && crate::now_ms() - at < 6000.0
                 {
                     let shown = st_most(ui, msg, t.accent_text, full_w * STATUS_MSG_SHARE);

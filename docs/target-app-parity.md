@@ -1,17 +1,16 @@
 # MailCraft vs Outlook: the assessment
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-17 · **Change:** minor (DAV.4: branded default for new Despres Connect accounts) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
+DAV.5 (2026-10-19): first DAV imports display and save verified batches, retain checkpoints and concurrent local edits across the final reply, show persistent progress counts, and back off automatic retries after failures.
+
+SEC.3 (2026-10-18): credential regression tests cover incoming mail and SMTP changes, and adding DAV with shared or separate CardDAV endpoints, including clearing remembered OAuth refresh tokens and refusing to reuse access tokens after a server edit or restart. Display-name edits and refused CardDAV edits preserve credentials. DAV cases switch OAuth accounts to the supported password authentication before checking that their old tokens are cleared.
+
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-19 · **Change:** minor (DAV.5: progressive first import and retry backoff; AUTO.4: client domains require discovery; SEC.3: regression coverage for SMTP/CardDAV credential clearing and remembered sign-ins; DAV.4: branded default for new Despres Connect accounts) · **Target:** Microsoft Outlook (Microsoft 365, classic desktop)
 
 New account default (DAV.4, 2026-10-17): Despres Connect uses `https://outlook.despresai.com/dav/` for calendar and contacts. Existing accounts retain their saved endpoints.
 
-Local tenant discovery (AUTO.3, 2026-10-17): unfamiliar domains can be confirmed by the
+Local tenant discovery (AUTO.3, 2026-10-17): client domains must be confirmed by the
 fixed Despres Connect HTTPS service and use its mail/calendar/contact profile without an app
 update. Requests contain only the domain; unknown domains keep normal setup. See
-[automatic-setup.md](automatic-setup.md).
-
-Local migrated-mailbox setup (AUTO.2, 2026-10-17): `badmintonsoldiers.club` uses the verified
-VM IMAP, existing SMTP relay and shared DAV profile before DNS lookup. Email and one password
-start mail, calendar and contacts together; existing accounts are preserved. See
 [automatic-setup.md](automatic-setup.md).
 
 Local setup input fix (ICLOUD.3, 2026-10-17): dialogs stay above their blocking overlay,
@@ -89,6 +88,7 @@ pictures and basic layout), #7 (at least rich replies), #9 and #11.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-18 | minor | AUTO.4: removed client-domain presets; tenant discovery and manual setup retained |
 | 2026-10-17 | minor | DAV.4: branded DAV default for new accounts; existing endpoints preserved |
 | 2026-10-17 | minor | AUTO.3: domain-only discovery of active Despres Connect tenants |
 | 2026-10-17 | minor | AUTO.2: automatic migrated Badminton Soldiers mail/calendar/contact profile |
@@ -102,3 +102,5 @@ pictures and basic layout), #7 (at least rich replies), #9 and #11.
 | 2026-10-17 | minor | ICLOUD.2: advertised IMAP SASL PLAIN; live iCloud sign-in pending |
 
 | 2026-10-17 | minor | ICLOUD.3: dialog input remains reachable after an outside click |
+| 2026-10-18 | minor | SEC.3: credential-clearing regression coverage for all four server settings, remembered sign-ins and restart |
+| 2026-10-19 | minor | DAV.5: progressive first import, saved checkpoints, progress and retry backoff |

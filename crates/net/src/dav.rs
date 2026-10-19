@@ -472,6 +472,12 @@ fn client_for<'a>(collection: &Collection, clients: &'a [Client]) -> Result<&'a 
 }
 /// Run against the snapshot, returning checkpoints only for verified server representations.
 pub fn sync(request: Request) -> Download {
+    sync_with_progress(request, |_| {})
+}
+
+/// Emit verified, bounded batches during the first read-only import. The final reply alone
+/// authorizes inventory pruning; progress never confirms writes or removes missing resources.
+pub fn sync_with_progress(request: Request, mut progress: impl FnMut(Download)) -> Download {
     let mut result = Download {
         account: request.account,
         before: request.mailbox.dav_resources.iter().filter(|r| r.account == request.account).cloned().collect(),
@@ -486,12 +492,16 @@ pub fn sync(request: Request) -> Download {
     result.login = Some(account.dav_login().into());
     result.resources = result.before.clone();
     result.snapshots = result.before.iter().map(|r| local(r, &request.mailbox)).collect();
-    let run = |result: &mut Download| -> Result<(), String> {
+    let mut run = |result: &mut Download| -> Result<(), String> {
         let clients = clients(account, &request.password)?;
         let zone = Zone::named(&request.mailbox.zone).unwrap_or(Zone::LOCAL);
         result.collections = collections(&clients, account.id)?;
         // Obtain all inventories before any writes. A malformed/partial listing never prunes data.
         let inventories = result.collections.iter().map(|c| client_for(c, &clients)?.inventory(c)).collect::<Result<Vec<_>, _>>()?;
+        let total = inventories.iter().map(|i| i.len()).sum();
+        let streaming = request.read_only && !request.mailbox.dav_collections.iter().any(|c| c.account == request.account);
+        let mut batch = Vec::new();
+        let mut processed = 0usize;
         let mut resources = Vec::new();
         let mut size = 0usize;
         for (collection, inventory) in result.collections.iter().zip(inventories) {
@@ -589,6 +599,12 @@ pub fn sync(request: Request) -> Download {
                         }
                         if let Some(value) = value {
                             size += value.raw.len();
+                            if size > 64 * 1024 * 1024 || resources.len() >= MAX_ITEMS {
+                                return Err("DAV account exceeds sync limits".into());
+                            }
+                            if streaming && before.is_none() {
+                                batch.push(value.clone());
+                            }
                             resources.push(value);
                         }
                     }
@@ -603,6 +619,19 @@ pub fn sync(request: Request) -> Download {
                 }
                 if size > 64 * 1024 * 1024 || resources.len() > MAX_ITEMS {
                     return Err("DAV account exceeds sync limits".into());
+                }
+                processed += 1;
+                if processed == 1 || processed.is_multiple_of(25) || processed == total {
+                    progress(Download {
+                        account: result.account,
+                        url: result.url.clone(),
+                        carddav_url: result.carddav_url.clone(),
+                        login: result.login.clone(),
+                        collections: if streaming { result.collections.clone() } else { Vec::new() },
+                        resources: std::mem::take(&mut batch),
+                        progress: Some((processed, total)),
+                        ..Default::default()
+                    });
                 }
             }
             // A server deletion conflicts with a local edit; preserve the local copy and checkpoint.

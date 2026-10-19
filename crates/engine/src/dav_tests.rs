@@ -69,6 +69,43 @@ fn seeded() -> Session {
     s
 }
 #[test]
+fn progressive_import_keeps_checkpoints_and_does_not_duplicate_the_final_reply() {
+    let mut s = session();
+    let mut first = initial(&s);
+    first.complete = false;
+    let mut final_reply = initial(&s);
+    apply(&mut s, first);
+    let id = *s.mailbox.contacts.keys().next().unwrap();
+    s.mailbox.contact_mut(id).unwrap().display_name = "Edited during import".into();
+    let mut second = initial(&s);
+    second.complete = false;
+    second.resources[0].href = format!("{BOOK}b.vcf");
+    second.resources[0].contacts[0].uid = "b".into();
+    second.resources[0].contacts[0].origin.id = second.resources[0].href.clone();
+    final_reply.resources.push(second.resources[0].clone());
+    apply(&mut s, second);
+    assert_eq!(s.mailbox.dav_resources.len(), 2, "each batch must retain earlier checkpoints");
+    apply(&mut s, final_reply);
+    assert_eq!(s.mailbox.contacts.len(), 2, "a repeated resource must retain its allocated id");
+    assert_eq!(s.mailbox.contact(id).unwrap().display_name, "Edited during import");
+    assert_eq!(s.mailbox.dav_collections.len(), 1);
+}
+
+#[test]
+fn progressive_import_final_reply_does_not_resurrect_a_contact_deleted_during_download() {
+    let mut s = session();
+    let final_reply = initial(&s);
+    let mut batch = initial(&s);
+    batch.complete = false;
+    apply(&mut s, batch);
+    let id = *s.mailbox.contacts.keys().next().unwrap();
+    s.mailbox.remove_contact(id).unwrap();
+    apply(&mut s, final_reply);
+    assert!(s.mailbox.contacts.is_empty());
+    assert_eq!(s.mailbox.dav_resources.len(), 1);
+    assert!(waiting(&s.mailbox, s.mailbox.accounts[0].id));
+}
+#[test]
 fn merge_does_not_duplicate_contacts_and_respects_remote_updates() {
     let mut s = seeded();
     assert_eq!(s.mailbox.contacts.len(), 1);

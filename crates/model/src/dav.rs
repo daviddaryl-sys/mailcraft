@@ -36,6 +36,8 @@ pub struct Request {
 
 #[derive(Default)]
 pub struct Download {
+    /// An intermediate update; the worker remains active. Counts contain no private item data.
+    pub progress: Option<(usize, usize)>,
     pub account: Id,
     pub url: String,
     pub carddav_url: String,

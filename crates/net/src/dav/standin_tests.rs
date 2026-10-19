@@ -223,6 +223,38 @@ fn adopt(m: &mut Mailbox, mut d: Download) {
     m.dav_resources = d.resources;
     m.dav_collections = d.collections;
 }
+
+#[test]
+fn first_import_emits_verified_batches_before_the_final_reply_and_resumes() {
+    let server = Fake::new();
+    {
+        let mut state = server.state.lock().unwrap();
+        for n in 0..30 {
+            state.items.insert(format!("{BOOK}extra-{n}.vcf"), (1, VCF.replace("contact-1", &format!("contact-{n}"))));
+        }
+    }
+    let mailbox = server.mailbox();
+    let mut batches = Vec::new();
+    let final_reply = sync_with_progress(Request { account: 1, password: "secret".into(), mailbox: mailbox.clone(), read_only: true }, |batch| {
+        assert!(!batch.complete);
+        assert!(batch.uploaded == 0 && batch.removed.is_empty());
+        assert!(batch.resources.len() <= 25);
+        batches.push(batch);
+    });
+    assert!(final_reply.complete, "{:?}", final_reply.errors);
+    assert_eq!(batches.first().unwrap().progress, Some((1, 32)));
+    assert_eq!(batches.last().unwrap().progress, Some((32, 32)));
+    assert_eq!(batches.iter().map(|b| b.resources.len()).sum::<usize>(), 32);
+    let mut resumed = mailbox;
+    resumed.dav_resources = batches.remove(0).resources;
+    let mut new_resources = 0;
+    let again = sync_with_progress(Request { account: 1, password: "secret".into(), mailbox: resumed, read_only: true }, |batch| {
+        new_resources += batch.resources.len();
+    });
+    assert!(again.complete);
+    assert_eq!(new_resources, 31, "already checkpointed documents must not be imported twice");
+    assert!(server.state.lock().unwrap().writes.is_empty());
+}
 #[test]
 fn separate_servers_with_identical_paths_sync_to_the_correct_origin_and_fail_atomically() {
     let calendar = Fake::new();
