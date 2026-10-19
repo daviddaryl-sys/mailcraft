@@ -103,6 +103,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # Executable and icon carry the display name (CFBundleExecutable / CFBundleIconFile).
 cp "$WORK/bin/mailcraft" "$APP/Contents/MacOS/MailCraft"
 cp "$ROOT/assets/branding/despres-connect/MailCraft.icns" "$APP/Contents/Resources/MailCraft.icns"
+# Keep the app self-contained when it is copied out of the disk image.
+for document in README.md LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md; do
+  cp "$ROOT/$document" "$APP/Contents/Resources/"
+done
 # Licences of the embedded craft-fonts fonts (only when built with CRAFT_FONTS_DIR).
 copy_font_licences "$APP/Contents/Resources"
 sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHORT_VERSION@/$SHORT_VERSION/g" \
