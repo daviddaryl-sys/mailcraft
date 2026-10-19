@@ -16,20 +16,20 @@ Privacy is part of the design: mail stays in your local mailbox, message content
 
 **Help shape MailCraft:** we are looking for our first five Mac testers. [Try it for ten minutes and leave feedback](TESTING.md), with sample mail and no real mailbox required.
 
-**[Latest packaged build: MailCraft 0.4.3 — upstream improvements and our icon](https://github.com/daviddaryl-sys/mailcraft/releases/tag/v0.4.3-despres.1)**
+**[Latest packaged build: MailCraft 0.4.3 — progressive sync fixes and our icon](https://github.com/daviddaryl-sys/mailcraft/releases/tag/v0.4.3-despres.2)**
 
 | Your Mac | Download |
 |---|---|
-| Apple Silicon — M1, M2, M3, M4 or newer | [Download for Apple Silicon (arm64 ZIP)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.1/MailCraft-0.4.3-despres.1-macos-arm64.zip) |
-| Intel | [Download for Intel (x86_64 ZIP)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.1/MailCraft-0.4.3-despres.1-macos-x86_64.zip) |
+| Apple Silicon — M1, M2, M3, M4 or newer | [Download for Apple Silicon (universal DMG)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.2/mailcraft-0.4.3-macos-universal.dmg) |
+| Intel | [Download for Intel (universal DMG)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.2/mailcraft-0.4.3-macos-universal.dmg) |
 
-**Windows 11 (Intel/AMD x64):** [Download the installer (MSI)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.1/mailcraft-0.4.3-windows-x64.msi) · [Portable ZIP](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.1/mailcraft-0.4.3-windows-x64-portable.zip).
+**Windows 11 (Intel/AMD x64):** [Download the installer (MSI)](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.2/mailcraft-0.4.3-windows-x64.msi) · [Portable ZIP](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.2/mailcraft-0.4.3-windows-x64-portable.zip).
 
 Run the MSI to install, or extract the portable ZIP and open `mailcraft.exe`. Both include this edition's fixes and icon. The Windows build is unsigned, so Windows SmartScreen may show an unknown-publisher warning. These are x64 downloads; a native Windows ARM build is not included. Back up any existing app and mailbox data before upgrading. Windows build and smoke-test details are on the release page.
 
 ### Windows 11: unknown publisher warning
 
-These early-alpha Windows builds are unsigned. If you downloaded MailCraft from [this repository's release page](https://github.com/daviddaryl-sys/mailcraft/releases/tag/v0.4.3-despres.1) and trust the source:
+These early-alpha Windows builds are unsigned. If you downloaded MailCraft from [this repository's release page](https://github.com/daviddaryl-sys/mailcraft/releases/tag/v0.4.3-despres.2) and trust the source:
 
 1. Open `mailcraft-0.4.3-windows-x64.msi`.
 2. If **Windows protected your PC** appears, select **More info → Run anyway**.
@@ -42,9 +42,9 @@ If **Run anyway** is missing, or the warning mentions malware or **Smart App Con
 
 ### Mac installation
 
-Check **Apple menu → About This Mac** if you are unsure: “Chip” identifies Apple Silicon; “Processor” naming Intel means the Intel download. Both bundles require macOS 11 or later. Unzip the download, quit and back up both your existing MailCraft app and its mailbox data, then drag `MailCraft.app` into Applications. No Rust or Homebrew installation is required.
+Check **Apple menu → About This Mac** if you are unsure: “Chip” identifies Apple Silicon; “Processor” naming Intel means the Intel download. The same universal app runs on both types of Mac and requires macOS 11 or later. Open the DMG, quit and back up both your existing MailCraft app and its mailbox data, then drag `MailCraft.app` into Applications. No Rust or Homebrew installation is required.
 
-These are early-alpha builds with local ad-hoc signatures, **not Apple-notarized**. macOS may require approval in **System Settings → Privacy & Security**; managed Macs may block them. Downloads contain the app and its licences, with no saved accounts, passwords or private mailbox data. Configure your own accounts after installation. [Checksums](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.1/SHA256SUMS.txt) and verification details are on the release page. Intel's version check passed under Rosetta; physical Intel hardware and older macOS versions have not been tested.
+These are early-alpha builds with local ad-hoc signatures, **not Apple-notarized**. macOS may require approval in **System Settings → Privacy & Security**; managed Macs may block them. Downloads contain the app and its licences, with no saved accounts, passwords or private mailbox data. Configure your own accounts after installation. [Checksums](https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.2/SHA256SUMS.txt) and verification details are on the release page. Intel's version check passed under Rosetta; physical Intel hardware and older macOS versions have not been tested.
 
 ## What this version improves
 
@@ -52,10 +52,11 @@ This edition builds on the original MailCraft foundation with work focused on ac
 
 - **Despres Connect setup:** email-first setup configures mail, calendar and contacts together. Client domains are checked against the Despres Connect domain-discovery service before ordinary provider discovery; no client-domain list is built into the app. Manual setup remains available. New accounts use `https://outlook.despresai.com/dav/`; existing accounts retain their saved settings. [Setup details](docs/automatic-setup.md).
 - **CalDAV and CardDAV:** shared or separate calendar/contact endpoints, discovery of collections and write permissions, and conditional synchronization with conflict checks. An unreadable new server item is left on the server and skipped so it cannot stall the whole download. Personal Contacts is preferred over recipient-cache collections. [Scope and limits](docs/dav-sync.md).
+- **Progressive first sync:** verified calendar events and contacts appear and save in batches while the first import runs. Progress stays visible, local edits and deletions are retained, and failed automatic passes back off from five to thirty minutes. Manual sync remains available.
 - **iCloud setup:** separate Apple calendar/contact service roots, constrained Apple server discovery, app-specific-password guidance, advertised IMAP SASL PLAIN support, and a fix for blocked account-dialog input. [iCloud details and verification limits](docs/icloud-setup.md).
 - **Credential protection:** changing an account's mail, calendar or separate contacts server clears its saved password/sign-in, including the OS credential-store entry, so a server change cannot silently carry remembered credentials to another endpoint.
 
-The 0.4.3 release integrates upstream improvements through `77a3253`: Microsoft Graph mail, agent permissions, privacy-safe logging, storage and search improvements, and better character decoding, while retaining this edition's fixes and branding. All seven repository CI checks passed: **2,189 tests passed, 9 ignored**, plus formatting, clippy, asset attribution, layering, WASM and dependency-policy checks. Migration was verified offline against backed-up mailbox copies, and the Apple Silicon app was checked with three configured accounts. This is not a claim of compatibility with every provider or Mac.
+The 0.4.3 release integrates upstream improvements through `77a3253`: Microsoft Graph mail, agent permissions, privacy-safe logging, storage and search improvements, and better character decoding, while retaining this edition's fixes and branding. All seven repository CI checks passed: **2,194 tests passed, 10 ignored**, plus formatting, clippy, asset attribution, layering, WASM and dependency-policy checks. Migration was verified offline against backed-up mailbox copies, and the Apple Silicon app was checked with three configured accounts. This is not a claim of compatibility with every provider or Mac.
 
 **Upgrading from 0.3?** Back up the app and its mailbox data before launching 0.4.3. It upgrades the mailbox to storage format 3; an older app needs the matching older data backup to roll back. Review the [known gaps](docs/gaps.md) before relying on this early-alpha software for important mail.
 
