@@ -432,6 +432,14 @@ fn pane_top(app: &mut MailApp, ui: &mut Ui, t: &Tokens) {
     // The line along the pane's top, and a little air under it.
     ui.add_space(4.0);
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
+    let add = Rect::from_min_max(pos2(r.min.x + HIGHLIGHT_LEFT, r.min.y), pos2(r.max.x - 30.0, r.max.y));
+    let response = ui.put(add, egui::Button::new(tl!("Add Mailbox…")).frame(false));
+    app.hit.add("addMailbox", 0, add);
+    if response.on_hover_text(tl!("Connect another mailbox alongside your existing accounts")).clicked()
+        && let Err(error) = app.run("ui.dialog", json!({"name": "account"}))
+    {
+        app.status(error);
+    }
     let button = Rect::from_center_size(pos2(r.max.x - 14.0, r.center().y), vec2(20.0, 20.0));
     let resp = ui.interact(button, ui.id().with("hide_pane"), Sense::click());
     if resp.hovered() {
@@ -705,8 +713,14 @@ mod tests {
     }
 
     fn window() -> egui_kittest::Harness<'static, MailApp> {
+        window_with_pane(crate::UiState::default().folder_pane_width, crate::UiState::default().theme)
+    }
+
+    fn window_with_pane(width: f32, theme: crate::theme::Appearance) -> egui_kittest::Harness<'static, MailApp> {
         let mut app = MailApp::new(Session::at(mailcraft_engine::sample::mailbox(NOW, 0), NOW, 0), Services::default());
         app.autosave = false;
+        app.ui.folder_pane_width = width;
+        app.ui.theme = theme;
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
             |ui, app: &mut MailApp| {
                 let ctx = ui.ctx().clone();
@@ -730,6 +744,25 @@ mod tests {
             harness.step();
         }
         harness.run_steps(2);
+    }
+
+    #[test]
+    fn add_mailbox_opens_setup_without_changing_existing_accounts() {
+        for theme in [crate::theme::Appearance::Light, crate::theme::Appearance::Dark] {
+            for width in [160.0, 180.0, 240.0] {
+                let mut harness = window_with_pane(width, theme);
+                let accounts = harness.state().session.mailbox.accounts.clone();
+                assert!(!accounts.is_empty());
+                let actual = harness.state().ui.folder_pane_width;
+                assert!((actual - width).abs() <= 1.0, "expected pane width {width}, got {actual}");
+                let add = harness.state().hit.rect("addMailbox", 0).unwrap();
+                let hide = harness.state().hit.rect("folderPaneHide", 0).unwrap();
+                assert!(add.width() > 0.0 && add.max.x <= hide.min.x, "pane width {width}: {add:?}, {hide:?}");
+                click(&mut harness, add.center());
+                assert_eq!(harness.state().dialog.as_ref().map(|dialog| dialog.name()), Some("account"), "pane width {width}");
+                assert_eq!(harness.state().session.mailbox.accounts, accounts);
+            }
+        }
     }
 
     /// The pane lists the folders in order down the screen, one row each, further in at each level.
