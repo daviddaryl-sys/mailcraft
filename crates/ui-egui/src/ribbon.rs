@@ -1275,14 +1275,32 @@ fn simple_button(app: &mut MailApp, ui: &mut Ui, t: &Tokens, b: &Button<'_>, lab
     let main_rect = if b.is_split() { Rect::from_min_max(rect.min, pos2(drop_rect.min.x, rect.max.y)) } else { rect };
     let main = ui.interact(main_rect, id, Sense::click());
     app.hit.add("ribbon", hit_id(item.key), main_rect);
-    if on {
+    let primary = on && item.command.as_ref().is_some_and(|(command, _)| *command == "mail.new");
+    if primary {
+        ui.painter().rect_filled(rect, 6.0, t.accent);
+        if main.hovered() || main.has_focus() {
+            ui.painter().rect_filled(main_rect.shrink(1.0), 5.0, t.accent.lerp_to_gamma(t.on_accent, 0.13));
+        }
+    } else if on {
         bg(ui, main_rect, &main, item.checked, t);
     }
-    let (ink, accent, text) = if on { (t.icon, t.accent, t.text) } else { (t.text_disabled, t.text_disabled, t.text_disabled) };
+    let (ink, accent, text) = if primary {
+        (t.on_accent, t.on_accent, t.on_accent)
+    } else if on {
+        (t.icon, t.accent, t.text)
+    } else {
+        (t.text_disabled, t.text_disabled, t.text_disabled)
+    };
     let icon = Rect::from_center_size(pos2(rect.min.x + PAD + ICON / 2.0, rect.center().y), vec2(ICON, ICON));
-    icons::paint(ui.painter(), icon, item.icon, ink, accent);
+    icons::paint(ui.painter(), icon, if primary { "newMailPrimary" } else { item.icon }, ink, if primary { t.accent } else { accent });
     if labelled {
-        ui.painter().text(pos2(icon.max.x + LABEL_GAP, rect.center().y), Align2::LEFT_CENTER, item.name(), regular(LABEL_SIZE), text);
+        ui.painter().text(
+            pos2(icon.max.x + LABEL_GAP, rect.center().y),
+            Align2::LEFT_CENTER,
+            item.name(),
+            if primary { semibold(LABEL_SIZE) } else { regular(LABEL_SIZE) },
+            text,
+        );
     }
     let Some((command, params)) = &item.command else {
         // The whole button opens its menu.
@@ -1301,8 +1319,18 @@ fn simple_button(app: &mut MailApp, ui: &mut Ui, t: &Tokens, b: &Button<'_>, lab
     // Its other half: the `▾` opens the menu, whether or not the command can run now.
     let drop = ui.interact(drop_rect, id.with("menu"), Sense::click());
     app.hit.add("ribbonMenu", hit_id(item.key), drop_rect);
-    bg(ui, drop_rect, &drop, false, t);
-    drop_mark(ui, drop_rect.center(), t.icon);
+    if primary {
+        if drop.hovered() || drop.has_focus() {
+            ui.painter().rect_filled(drop_rect.shrink(1.0), 5.0, t.accent.lerp_to_gamma(t.on_accent, 0.13));
+        }
+        ui.painter().line_segment(
+            [pos2(drop_rect.min.x, drop_rect.min.y + 7.0), pos2(drop_rect.min.x, drop_rect.max.y - 7.0)],
+            Stroke::new(1.0, t.accent.lerp_to_gamma(t.on_accent, 0.42)),
+        );
+    } else {
+        bg(ui, drop_rect, &drop, false, t);
+    }
+    drop_mark(ui, drop_rect.center(), if primary { t.on_accent } else { t.icon });
     let tip = b.drops.first().map_or_else(|| item.tip_text(), |under| under.tip_text());
     let drop = drop.on_hover_text(tip);
     egui::Popup::menu(&drop).show(|ui| drop_menu(ui, app, b));
@@ -1317,8 +1345,14 @@ pub(crate) fn behind_more(ctx: &egui::Context) -> Vec<&'static str> {
 /// The simplified layout: one row of `tab` in `area`, with `…` at its end for what doesn't fit.
 fn simplified(app: &mut MailApp, ui: &mut Ui, t: &Tokens, tab: &Tab, area: Rect) {
     let buttons = row(tab);
-    let names: Vec<f32> =
-        buttons.iter().map(|b| ui.ctx().fonts_mut(|f| f.layout_no_wrap(b.item.name(), regular(LABEL_SIZE), t.text).size().x)).collect();
+    let names: Vec<f32> = buttons
+        .iter()
+        .map(|b| {
+            ui.ctx().fonts_mut(|f| {
+                f.layout_no_wrap(b.item.name(), if b.item.key == "mail.new" { semibold(LABEL_SIZE) } else { regular(LABEL_SIZE) }, t.text).size().x
+            })
+        })
+        .collect();
     let width = |i: usize, labelled: bool| match (buttons.get(i), names.get(i)) {
         (Some(b), Some(text)) => button_width(b, labelled, *text),
         _ => 0.0,

@@ -284,27 +284,46 @@ fn header(app: &mut MailApp, ui: &mut Ui, m: &Arc<Message>, place: Place, pictur
     // The texts that can be selected are laid out here and painted once the pointer has had its
     // say ([`select::header`]).
     let mut fields = select::Fields::default();
-    let around = egui::Frame::NONE.inner_margin(egui::Margin { left: 20, right: 12, top: 12, bottom: 10 }).show(ui, |ui| {
+    let pane = place == Place::Pane;
+    let margin =
+        if pane { egui::Margin { left: 24, right: 18, top: 16, bottom: 14 } } else { egui::Margin { left: 20, right: 12, top: 12, bottom: 10 } };
+    let around = egui::Frame::NONE.inner_margin(margin).show(ui, |ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
-        // Subject, with the actions on the right (a window has them in its toolbar).
-        ui.horizontal(|ui| {
-            let subject = if m.subject.trim().is_empty() { tl!("(no subject)") } else { m.subject.as_str() };
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
-                if place == Place::Pane {
-                    for (icon, tip, id) in ACTIONS.iter().rev() {
-                        let sc = crate::widgets::shortcut_text(app, id);
-                        if crate::widgets::icon_button(ui, icon, &format!("{} ({sc})", tl!(tip)), 17.0, true).clicked() {
-                            let _ = app.run(id, json!({}));
-                        }
+        let narrow = pane && ui.available_width() < 400.0;
+        let subject = if m.subject.trim().is_empty() { tl!("(no subject)") } else { m.subject.as_str() };
+        let title = || {
+            egui::Label::new(
+                egui::RichText::new(subject)
+                    .font(semibold(if narrow {
+                        20.0
+                    } else if pane {
+                        22.0
+                    } else {
+                        17.0
+                    }))
+                    .color(t.text),
+            )
+            .wrap()
+        };
+        // Keep the subject's full line on a narrow pane, and put the actions beneath it.
+        if narrow {
+            fields.add(ui, select::Field::Subject, title());
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| pane_actions(app, ui));
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    if pane {
+                        pane_actions(app, ui);
                     }
-                }
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                    fields.add(ui, select::Field::Subject, egui::Label::new(egui::RichText::new(subject).font(semibold(17.0)).color(t.text)).wrap());
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                        fields.add(ui, select::Field::Subject, title());
+                    });
                 });
             });
-        });
-        ui.add_space(4.0);
+        }
+        ui.add_space(if pane { 9.0 } else { 4.0 });
         // Who and when.
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::hover());
@@ -312,22 +331,29 @@ fn header(app: &mut MailApp, ui: &mut Ui, m: &Arc<Message>, place: Place, pictur
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 1.0);
                 let when = mailcraft_time::header_label(m.date, app.session.offset_at(m.date), app.session.prefs.twelve_hour);
-                // The date first, at the right; the name and address get what is left, cut short
-                // when the pane is narrow rather than run under the date.
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(8.0);
-                        fields.add(ui, select::Field::Date, egui::Label::new(egui::RichText::new(when).font(regular(11.5)).color(t.text_dim)));
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            let name = egui::RichText::new(m.from.display()).font(semibold(13.0)).color(t.text);
-                            fields.add(ui, select::Field::Sender, egui::Label::new(name).truncate());
-                            if !m.from.name.is_empty() {
-                                let address = egui::RichText::new(format!("<{}>", m.from.email)).font(regular(11.5)).color(t.text_dim);
-                                fields.add(ui, select::Field::Address, egui::Label::new(address).truncate());
-                            }
+                let date = || egui::Label::new(egui::RichText::new(&when).font(regular(11.5)).color(t.text_dim)).truncate();
+                let sender = |fields: &mut select::Fields, ui: &mut Ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    let name = egui::RichText::new(m.from.display()).font(semibold(13.0)).color(t.text);
+                    fields.add(ui, select::Field::Sender, egui::Label::new(name).truncate());
+                    if !m.from.name.is_empty() {
+                        let address = egui::RichText::new(format!("<{}>", m.from.email)).font(regular(11.5)).color(t.text_dim);
+                        fields.add(ui, select::Field::Address, egui::Label::new(address).truncate());
+                    }
+                };
+                if narrow {
+                    ui.horizontal(|ui| sender(&mut fields, ui));
+                    fields.add(ui, select::Field::Date, date());
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_space(4.0);
+                            fields.add(ui, select::Field::Date, date());
+                            ui.add_space(8.0);
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| sender(&mut fields, ui));
                         });
                     });
-                });
+                }
                 let mut line = |ui: &mut Ui, field: select::Field, label: &str, list: &[mailcraft_model::Address]| {
                     if !list.is_empty() {
                         let text = egui::RichText::new(format!("{} {}", tl!(label), format_list(list))).font(regular(11.5)).color(t.text_dim);
@@ -345,6 +371,16 @@ fn header(app: &mut MailApp, ui: &mut Ui, m: &Arc<Message>, place: Place, pictur
     select::header(app, ui, place, fields, around.response.rect);
     let r = ui.available_rect_before_wrap();
     ui.painter().line_segment([pos2(r.min.x, r.min.y), pos2(r.max.x, r.min.y)], Stroke::new(1.0, t.border));
+}
+
+fn pane_actions(app: &mut MailApp, ui: &mut Ui) {
+    ui.spacing_mut().item_spacing.x = 2.0;
+    for (icon, tip, id) in ACTIONS.iter().rev() {
+        let shortcut = crate::widgets::shortcut_text(app, id);
+        if crate::widgets::icon_button(ui, icon, &format!("{} ({shortcut})", tl!(tip)), 17.0, true).clicked() {
+            let _ = app.run(id, json!({}));
+        }
+    }
 }
 
 /// Info lines under the header: the flag, importance, what was done with the message, its

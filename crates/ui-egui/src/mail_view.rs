@@ -1,7 +1,6 @@
 //! Mail: the folder pane, the message list and the reading pane (or the message being written).
 //!
-//! The message list is laid out to the pixel from classic Outlook's at 100 %: every number below
-//! is a distance measured there, in points (pixels at 100 %).
+//! Keep the sender, subject and preview on a stable grid so the inbox is quick to scan.
 
 use std::sync::Arc;
 
@@ -20,60 +19,35 @@ mod server_rows;
 /// let go over (`nav::folder_row` takes them).
 pub(crate) struct MessageDrag(pub Vec<Id>);
 
-/// A group heading in the list (Today, Yesterday…): a box with a line round it.
+/// Height and type for the quiet date dividers.
 const GROUP_H: f32 = 25.0;
-/// A group heading's text: 9 pt.
 const GROUP_TEXT: f32 = 12.0;
-/// The sender's name, and the tabs above the list: 11 pt.
-const SENDER_TEXT: f32 = 15.0;
-/// Subject, time and preview: 8 pt.
-const LIST_TEXT: f32 = 11.0;
-/// How the list is arranged, in its header: 9 pt.
+const SENDER_TEXT: f32 = 14.0;
+const LIST_TEXT: f32 = 12.0;
 const SORT_TEXT: f32 = 12.0;
-/// The list's header (the filter's tabs, the arrangement). Its last pixel row is the line under
-/// the tab in use.
-const HEADER_H: f32 = 48.0;
-/// From one tab in the header to the next.
+const HEADER_H: f32 = 76.0;
+const CONTROL_Y: f32 = 56.0;
 const TAB_GAP: f32 = 14.0;
-/// The least of a tab's name that is worth showing.
 const TAB_MIN: f32 = 22.0;
-/// What is in a row keeps this far from the list's left edge: the line under it, the box of a
-/// group heading, the bar an unread message wears and the fill of a selected one start here.
-const ROW_INSET: f32 = 2.0;
-/// How wide the read/unread switch at a row's left edge is.
-const READ_STRIP: f32 = 12.0;
-/// Where a row's text starts, from the list's left edge.
-const TEXT_LEFT: f32 = 30.0;
-/// Rows end this far from the list's right edge: a gap, the scroll bar's lane, and its margin.
+const ROW_INSET: f32 = 5.0;
+/// The left edge still toggles read state, now marked by a dot.
+const READ_STRIP: f32 = 19.0;
+const TEXT_LEFT: f32 = 24.0;
 const SCROLL_LANE: f32 = SCROLL_GAP + SCROLL_TRACK + SCROLL_MARGIN;
 const SCROLL_GAP: f32 = 7.0;
 const SCROLL_TRACK: f32 = 17.0;
 const SCROLL_MARGIN: f32 = 5.0;
-/// The scroll bar's handle, in the middle of its lane.
 const SCROLL_HANDLE: f32 = 9.0;
-/// The ends of the lane, each with an arrow in it: the handle travels between them.
 const SCROLL_END: f32 = 19.0;
-/// The time ends this far from a row's right end. What is right of it is the flag's column.
 const TIME_RIGHT: f32 = 24.0;
-/// Sender, subject and preview end this far from a row's right end, where the time's column
-/// starts: every row's text stops at the same place, whatever its time.
-const TEXT_RIGHT: f32 = 98.0;
-/// Where a quick action (delete, flag) on the row under the pointer takes a click.
+const TEXT_RIGHT: f32 = 24.0;
 const QUICK_TARGET: egui::Vec2 = egui::vec2(28.0, 22.0);
-/// The clear space between the quick actions, and between them and the marks before them.
 const QUICK_GAP: f32 = 6.0;
-/// The middle of the sender's capitals, from a row's top: they stand 15 below the line above.
-const SENDER_Y: f32 = 21.0;
-/// The middle of the subject's (and the time's) capitals, from a row's top.
-const SUBJECT_Y: f32 = 37.5;
-/// The top of the preview's first line box, from a row's top: its text ends 15 above the line
-/// under a row.
-const PREVIEW_TOP: f32 = 45.0;
-/// From one line of preview to the next.
-const PREVIEW_PITCH: f32 = 13.0;
-/// A row with one line of preview, the line under it included.
-const ROW_H: f32 = 72.0;
-/// What a row loses without a preview: the preview's line and the gap above it.
+const SENDER_Y: f32 = 16.0;
+const SUBJECT_Y: f32 = 33.0;
+const PREVIEW_TOP: f32 = 42.0;
+const PREVIEW_PITCH: f32 = 14.0;
+const ROW_H: f32 = 65.0;
 const PREVIEW_FIRST: f32 = 15.0;
 
 /// While messages are being dragged: a small label by the pointer saying how many.
@@ -124,7 +98,10 @@ pub fn show(app: &mut MailApp, ui: &mut Ui) {
             .frame(frame)
             .show(ui, |ui| list(app, ui));
     } else {
-        let max = (ui.available_width() - 260.0).max(260.0);
+        let available = ui.available_width();
+        // On a compact window, let the reading pane keep a little over half the workspace.
+        let reading_min = (available * 0.54).clamp(260.0, 420.0);
+        let max = (available - reading_min).max(240.0);
         let shown = egui::Panel::left("message_list")
             .default_size(app.ui.list_width.min(max))
             .size_range(240.0..=max)
@@ -142,10 +119,8 @@ pub fn show(app: &mut MailApp, ui: &mut Ui) {
     });
 }
 
-/// A row and the line under it: 72 with one line of preview (15 clear above the sender's
-/// capitals and 15 under the preview's), 13 more for each further line, 57 with none. It depends
-/// on nothing but the number of preview lines, so where a row is can be worked out without
-/// laying out the rows before it.
+/// A row takes 50 points without a preview, 65 with one line, and 14 more for each
+/// additional line. The list can position visible rows without laying out those above them.
 fn row_height(preview_lines: u8) -> f32 {
     match preview_lines.min(3) {
         0 => ROW_H - PREVIEW_FIRST,
@@ -186,10 +161,22 @@ fn list_header(app: &mut MailApp, ui: &mut Ui) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H), Sense::hover());
     let rows_end = r.max.x - SCROLL_LANE;
 
+    let folder = app.session.mailbox.folder(app.session.view.folder);
+    let name = if app.session.view.search.trim().is_empty() {
+        folder.map_or_else(|| tl!("Mail").to_string(), |f| crate::nav::folder_label(&app.session.mailbox, f))
+    } else {
+        tl!("Search").to_string()
+    };
+    let title = Rect::from_min_max(pos2(r.min.x + TEXT_LEFT, r.min.y + 6.0), pos2(rows_end, r.min.y + 38.0));
+    paint_clipped(ui.painter(), pos2(title.min.x, title.center().y), title.width().max(0.0), &name, semibold(21.0), t.text);
+    ui.interact(title, ui.id().with("list_title"), Sense::hover()).on_hover_text(name);
+    app.hit.add("listTitle", 0, title);
+    ui.painter().line_segment([pos2(r.min.x, r.max.y - 0.5), pos2(r.max.x, r.max.y - 0.5)], Stroke::new(1.0, t.border));
+
     // The arrow: up while the list starts where its arrangement naturally starts (the newest,
     // A, the largest), down once it is turned over.
     let (sort, descending) = (app.session.view.sort, app.session.view.sort_descending);
-    let arrow = Rect::from_center_size(pos2(rows_end - 11.0, r.min.y + 33.0), vec2(20.0, 22.0));
+    let arrow = Rect::from_center_size(pos2(rows_end - 11.0, r.min.y + CONTROL_Y), vec2(20.0, 22.0));
     let arrow_resp = ui.interact(arrow, ui.id().with("list_direction"), Sense::click()).on_hover_text(tl!(direction_label(sort, descending)));
     app.hit.add("listSort", 1, arrow);
     if arrow_resp.hovered() {
@@ -204,14 +191,14 @@ fn list_header(app: &mut MailApp, ui: &mut Ui) {
     let label = tl!(sort_label(sort));
     let label_w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(label.to_string(), regular(SORT_TEXT), t.text).size().x);
     let label_end = rows_end - 46.0;
-    let sr = Rect::from_min_max(pos2(label_end - label_w - 6.0, r.min.y + 22.0), pos2(rows_end - 25.0, r.min.y + 44.0));
+    let sr = Rect::from_min_max(pos2(label_end - label_w - 6.0, r.min.y + CONTROL_Y - 13.0), pos2(rows_end - 25.0, r.min.y + CONTROL_Y + 13.0));
     let sresp = ui.interact(sr, ui.id().with("list_sort"), Sense::click());
     app.hit.add("listSort", 0, sr);
     if sresp.hovered() {
         ui.painter().rect_filled(sr, 4.0, t.hover);
     }
-    ui.painter().text(pos2(label_end, r.min.y + 33.5), Align2::RIGHT_CENTER, label, regular(SORT_TEXT), t.text);
-    let chevron = pos2(rows_end - 36.0, r.min.y + 34.0);
+    ui.painter().text(pos2(label_end, r.min.y + CONTROL_Y), Align2::RIGHT_CENTER, label, regular(SORT_TEXT), t.text);
+    let chevron = pos2(rows_end - 36.0, r.min.y + CONTROL_Y);
     let line = Stroke::new(1.2, t.text);
     ui.painter().line(vec![chevron + vec2(-4.5, -2.5), chevron + vec2(0.0, 2.5), chevron + vec2(4.5, -2.5)], line);
     let filter = app.session.view.filter;
@@ -261,10 +248,17 @@ fn list_header(app: &mut MailApp, ui: &mut Ui) {
         if w < TAB_MIN / 2.0 {
             continue;
         }
-        let tab = Rect::from_min_max(pos2(x, r.min.y + 18.0), pos2(x + w + 3.0, r.max.y));
+        let tab = Rect::from_min_max(pos2(x, r.min.y + CONTROL_Y - 14.0), pos2(x + w + 3.0, r.max.y));
         let resp = ui.interact(tab.expand2(vec2(5.0, 0.0)), ui.id().with(("list_tab", n)), Sense::click());
         app.hit.add("listTab", n, tab);
-        paint_clipped(ui.painter(), pos2(x + 2.0, r.min.y + 31.5), w + 1.0, label, regular(SENDER_TEXT), if on { t.accent_text } else { t.text });
+        paint_clipped(
+            ui.painter(),
+            pos2(x + 2.0, r.min.y + CONTROL_Y),
+            w + 1.0,
+            label,
+            if on { semibold(LIST_TEXT) } else { regular(LIST_TEXT) },
+            if on { t.accent_text } else { t.text_dim },
+        );
         let under = Rect::from_min_max(pos2(tab.min.x, r.max.y - 1.0), tab.max);
         if on {
             ui.painter().rect_filled(under, 0.0, t.accent_text);
@@ -499,7 +493,7 @@ fn list(app: &mut MailApp, ui: &mut Ui) {
     let lane = scroll_lane(outer);
     let scrolls = total > outer.height();
     if scrolls {
-        ui.painter().rect_filled(lane, SCROLL_TRACK / 2.0, if t.dark { t.panel } else { t.canvas });
+        ui.painter().rect_filled(lane, SCROLL_TRACK / 2.0, t.surface);
     }
     // The handle keeps clear of the arrows at the ends of its lane (a lane too short for them
     // has none).
@@ -523,21 +517,18 @@ fn list(app: &mut MailApp, ui: &mut Ui) {
                     break;
                 }
                 if let Some(group) = &row.group {
-                    // A box a step lighter than the list (a step darker on a light one), with a line round it.
-                    let gr = Rect::from_min_max(pos2(origin.x + ROW_INSET, origin.y + top - GROUP_H), pos2(origin.x + width, origin.y + top));
-                    let fill = t.surface.lerp_to_gamma(t.selection, if t.dark { 1.0 } else { 0.45 });
-                    let line = Stroke::new(1.0, t.border_strong);
-                    ui.painter().rect_filled(gr, 0.0, fill);
-                    // The line under the row above is this box's top edge, except for the first box.
-                    let (left, right, bottom) = (gr.min.x + 0.5, gr.max.x - 0.5, gr.max.y - 0.5);
-                    let top = if i == 0 { gr.min.y + 0.5 } else { gr.min.y };
-                    ui.painter().line_segment([pos2(left, top), pos2(left, gr.max.y)], line);
-                    ui.painter().line_segment([pos2(right, top), pos2(right, gr.max.y)], line);
-                    ui.painter().line_segment([pos2(gr.min.x, bottom), pos2(gr.max.x, bottom)], line);
-                    if i == 0 {
-                        ui.painter().line_segment([pos2(gr.min.x, top), pos2(gr.max.x, top)], line);
-                    }
-                    paint_clipped(ui.painter(), pos2(gr.min.x + 10.0, gr.center().y), gr.width() - 16.0, tl!(group), semibold(GROUP_TEXT), t.text);
+                    // A quiet date divider, aligned to the subject and sender.
+                    let gr =
+                        Rect::from_min_max(pos2(origin.x + ROW_INSET, origin.y + top - GROUP_H), pos2(origin.x + width - ROW_INSET, origin.y + top));
+                    ui.painter().rect_filled(gr, 4.0, t.panel);
+                    paint_clipped(
+                        ui.painter(),
+                        pos2(origin.x + TEXT_LEFT, gr.center().y),
+                        (gr.width() - TEXT_LEFT).max(0.0),
+                        tl!(group),
+                        semibold(GROUP_TEXT),
+                        t.group_label,
+                    );
                 }
                 let rect = Rect::from_min_size(pos2(origin.x, origin.y + top), vec2(width, row_h));
                 if reveal && Some(row.id) == focus {
@@ -592,25 +583,8 @@ fn preview(ui: &Ui, rev: u64, m: &Arc<Message>, max_chars: usize) -> Arc<str> {
 }
 
 /// A line of dots round `r`, one pixel on and one off: the mark of the row the keys act on.
-fn dotted_frame(p: &egui::Painter, r: Rect, color: Color32) {
-    // A dot is a pixel of the screen, on the screen's own grid, so the line stays one of dots
-    // at any scale. They go out as one mesh: shapes this small are smoothed away otherwise.
-    let dot = 1.0 / p.pixels_per_point().max(0.25);
-    let r = egui::emath::GuiRounding::round_to_pixels(r, p.pixels_per_point());
-    let steps = |length: f32| ((length / (2.0 * dot)).ceil() as usize).min(4000);
-    let mut dots = egui::Mesh::default();
-    let mut put = |x: f32, y: f32| dots.add_colored_rect(Rect::from_min_size(pos2(x, y), vec2(dot, dot)), color);
-    for i in 0..steps(r.width()) {
-        let x = r.min.x + i as f32 * 2.0 * dot;
-        put(x, r.min.y);
-        put(x, r.max.y - dot);
-    }
-    for i in 0..steps(r.height()) {
-        let y = r.min.y + i as f32 * 2.0 * dot;
-        put(r.min.x, y);
-        put(r.max.x - dot, y);
-    }
-    p.add(egui::Shape::mesh(dots));
+fn focus_frame(p: &egui::Painter, r: Rect, color: Color32) {
+    p.rect_stroke(r, 6.0, Stroke::new(1.0, color), egui::StrokeKind::Inside);
 }
 
 /// Where a message's follow-up flag stands, as its row in the list shows it.
@@ -688,38 +662,36 @@ fn message_row(app: &mut MailApp, ui: &mut Ui, row: &Row, rect: Rect) {
     let focus = app.session.sel.focus() == Some(row.id);
     let p = ui.painter();
     // The row is what is above the line under it; its content starts a little in from the list's edge.
-    let body = Rect::from_min_max(pos2(rect.min.x + ROW_INSET, rect.min.y), pos2(rect.max.x, rect.max.y - 1.0));
+    let body = Rect::from_min_max(rect.min + vec2(ROW_INSET, 1.0), rect.max - vec2(ROW_INSET, 1.0));
     let follow_up = FollowUp::of(&m, &app.session);
     let fill = row_fill(&t, follow_up, selected, focus);
     if let Some(fill) = fill {
-        p.rect_filled(body, 0.0, fill);
+        p.rect_filled(body, 6.0, fill);
         if fill == t.flagged_row {
             app.hit.add("messageFlagShade", row.id, body);
         }
     }
     if !selected && (resp.hovered() || read_resp.hovered() || quick.is_some()) {
         // The pointer's shade goes over a flagged row's tint.
-        p.rect_filled(body, 0.0, t.hover.linear_multiply(0.6));
+        p.rect_filled(body, 6.0, t.hover);
     }
     // Past its due date, its text is red.
     let overdue = follow_up == FollowUp::Overdue;
     if overdue {
         app.hit.add("messageOverdue", row.id, body);
     }
-    // Unread wears the bar; under the pointer it widens, and a read message shows a faint one
-    // so the switch can be found.
-    let bar = Rect::from_min_max(body.min, pos2(body.min.x + if read_resp.hovered() { 6.0 } else { 4.0 }, body.max.y));
+    // Filled for unread, outlined on hover for read. The whole left target still toggles it.
+    let dot = pos2(rect.min.x + READ_STRIP / 2.0 + 1.0, line1);
     if unread {
-        p.rect_filled(bar, 0.0, t.accent);
-    } else if read_resp.hovered() {
-        p.rect_filled(bar, 0.0, t.accent.linear_multiply(0.4));
+        p.circle_filled(dot, if read_resp.hovered() { 4.5 } else { 3.5 }, t.accent);
+    } else if read_resp.hovered() || read_resp.has_focus() {
+        p.circle_stroke(dot, 3.5, Stroke::new(1.0, t.accent));
     }
     if selected && focus {
-        // The message the keys act on has a line of dots round it.
-        dotted_frame(p, body, t.text_dim);
+        focus_frame(p, body, t.accent);
     }
-    let rule = if t.dark { t.border_strong } else { t.border };
-    p.line_segment([pos2(body.min.x, rect.max.y - 0.5), pos2(rect.max.x, rect.max.y - 0.5)], Stroke::new(1.0, rule));
+    let y = rect.max.y - 0.5;
+    p.line_segment([pos2(rect.min.x + TEXT_LEFT, y), pos2(body.max.x, y)], Stroke::new(1.0, t.border));
 
     // Sent, drafts and outbox show who it went to rather than who wrote it.
     let outgoing = app.session.mailbox.folder(m.folder).is_some_and(|f| matches!(f.kind, FolderKind::Sent | FolderKind::Drafts | FolderKind::Outbox));
@@ -796,7 +768,7 @@ fn message_row(app: &mut MailApp, ui: &mut Ui, row: &Row, rect: Rect) {
     let (date_font, date_color) = match (unread, overdue) {
         (true, false) => (semibold(LIST_TEXT), t.accent_text),
         (true, true) => (semibold(LIST_TEXT), t.overdue),
-        (false, _) => (regular(LIST_TEXT), if overdue { t.overdue } else { t.text }),
+        (false, _) => (regular(LIST_TEXT), if overdue { t.overdue } else { t.text_dim }),
     };
     let date_w = p.text(pos2(time_end, line2), Align2::RIGHT_CENTER, &date, date_font, date_color).width();
     let mut subject_end = text_end.min(time_end - date_w - 8.0);
@@ -1004,10 +976,7 @@ mod tests {
 
     #[test]
     fn a_rows_height_is_its_preview_lines_and_nothing_else() {
-        // One line of preview: 15 clear above the sender's capitals (11 tall), 7 to the subject's
-        // (8 tall), 7 to the preview's (8 tall), 15 under them, and the line under the row.
-        assert_eq!(row_height(1), 15.0 + 11.0 + 7.0 + 8.0 + 7.0 + 8.0 + 15.0 + 1.0);
-        assert_eq!([row_height(0), row_height(1), row_height(2), row_height(3)], [57.0, 72.0, 85.0, 98.0]);
+        assert_eq!([row_height(0), row_height(1), row_height(2), row_height(3)], [50.0, 65.0, 79.0, 93.0]);
         assert_eq!(row_height(200), row_height(3));
         assert_eq!(SCROLL_LANE, 29.0);
     }
@@ -1110,7 +1079,7 @@ mod tests {
         // The flag is in its own column at the row's end, delete before it, both on the sender's line.
         assert!(flag.max.x <= rect.max.x && (flag.center().y - (rect.min.y + SENDER_Y)).abs() < 0.01);
         assert_eq!(delete.center().y, flag.center().y);
-        assert!(delete.max.x <= flag.min.x && delete.min.x > rect.max.x - TEXT_RIGHT, "the buttons keep out of the text's column");
+        assert!(delete.max.x <= flag.min.x && delete.min.x > rect.min.x + TEXT_LEFT, "the buttons leave space for the sender");
         // Big enough to hit without aiming, and apart, so a click meant for one doesn't take the other.
         for b in [flag, delete] {
             assert!(b.width() >= 28.0 && b.height() >= 22.0, "{b:?}");

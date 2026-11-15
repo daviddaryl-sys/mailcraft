@@ -172,88 +172,88 @@ pub struct Tokens {
 }
 
 impl Tokens {
-    /// The light palette: white and very light neutral greys, with a blue accent.
+    /// The light palette: paper and green-tinted neutrals, with a deep teal accent.
     ///
     /// The window's own background (title bar, tab strip, module bar, status bar, and what shows
-    /// between the panes) is one grey; the ribbon and the panes sit on it as lighter sheets.
+    /// between the panes) shares one base; the ribbon and the panes sit on lighter surfaces.
     pub fn light() -> Self {
-        let window = Color32::from_rgb(0xF3, 0xF3, 0xF3);
+        let window = Color32::from_rgb(0xEA, 0xF0, 0xEF);
         Tokens {
             dark: false,
             title_bar: window,
-            ribbon: Color32::WHITE,
+            ribbon: Color32::from_rgb(0xF5, 0xF8, 0xF7),
             tab_strip: window,
             nav: window,
             canvas: window,
-            panel: Color32::from_rgb(0xFA, 0xFA, 0xFA),
-            surface: Color32::WHITE,
-            border: Color32::from_rgb(0xE0, 0xE0, 0xE0),
-            border_strong: Color32::from_rgb(0xC4, 0xC4, 0xC4),
-            text: Color32::from_rgb(0x24, 0x24, 0x24),
-            text_dim: Color32::from_rgb(0x61, 0x61, 0x61),
-            text_disabled: Color32::from_rgb(0xA6, 0xA6, 0xA6),
-            icon: Color32::from_rgb(0x42, 0x42, 0x42),
-            hover: Color32::from_rgb(0xE9, 0xE9, 0xE9),
-            pressed: Color32::from_rgb(0xD6, 0xD6, 0xD6),
-            checked: Color32::from_rgb(0xD6, 0xE8, 0xF8),
-            accent: Color32::from_rgb(0x0F, 0x6C, 0xBD),
-            accent_text: Color32::from_rgb(0x11, 0x5E, 0xA3),
-            on_accent: Color32::WHITE,
-            input: Color32::WHITE,
-            input_border: Color32::from_rgb(0xC4, 0xC4, 0xC4),
-            group_label: Color32::from_rgb(0x70, 0x70, 0x70),
+            panel: Color32::from_rgb(0xED, 0xF3, 0xF1),
+            surface: Color32::from_rgb(0xFA, 0xFC, 0xFB),
+            border: Color32::from_rgb(0xD9, 0xE3, 0xDF),
+            border_strong: Color32::from_rgb(0xA8, 0xBB, 0xB5),
+            text: Color32::from_rgb(0x19, 0x2D, 0x2A),
+            text_dim: Color32::from_rgb(0x4C, 0x65, 0x5F),
+            text_disabled: Color32::from_rgb(0x78, 0x8C, 0x86),
+            icon: Color32::from_rgb(0x34, 0x53, 0x4D),
+            hover: Color32::from_rgb(0xE4, 0xEE, 0xEA),
+            pressed: Color32::from_rgb(0xD1, 0xE3, 0xDD),
+            checked: Color32::from_rgb(0xD9, 0xEC, 0xE5),
+            accent: Color32::from_rgb(0x09, 0x67, 0x58),
+            accent_text: Color32::from_rgb(0x0A, 0x64, 0x56),
+            on_accent: Color32::from_rgb(0xF4, 0xFB, 0xF8),
+            input: Color32::from_rgb(0xFA, 0xFC, 0xFB),
+            input_border: Color32::from_rgb(0xA8, 0xBB, 0xB5),
+            group_label: Color32::from_rgb(0x50, 0x69, 0x61),
             status_bar: window,
-            selection: Color32::from_rgb(0xDE, 0xDE, 0xDE),
+            selection: Color32::from_rgb(0xD9, 0xEC, 0xE5),
             find_highlight: Color32::from_rgba_unmultiplied(0xFF, 0xE0, 0x3D, 0x90),
             flagged_row: Color32::from_rgb(0xFC, 0xF0, 0xF1),
             overdue: Color32::from_rgb(0xB4, 0x23, 0x18),
             off_hours: Color32::from_rgb(0xF5, 0xF5, 0xF5),
             today: Color32::from_rgb(0xEB, 0xF3, 0xFC),
-            menu: Color32::WHITE,
+            menu: Color32::from_rgb(0xF5, 0xF8, 0xF7),
             blue: Color32::from_rgb(0x2F, 0x6F, 0xD0),
             red: Color32::from_rgb(0xD1, 0x3B, 0x3B),
             green: Color32::from_rgb(0x2E, 0x8B, 0x57),
             orange: Color32::from_rgb(0xE0, 0x7B, 0x1F),
         }
     }
-    /// The dark palette: near-black neutral greys, with a light blue accent.
+    /// The dark palette: green-tinted graphite, with a soft mint accent.
     ///
     /// The window's own background is the darkest, and one colour everywhere it shows; the ribbon
     /// is a lighter band on it, the folder pane nearly as dark as the window, the lists a step up.
     pub fn dark() -> Self {
-        let window = Color32::from_rgb(0x0F, 0x16, 0x1F);
+        let window = Color32::from_rgb(0x13, 0x20, 0x1F);
         Tokens {
             dark: true,
             title_bar: window,
-            ribbon: Color32::from_rgb(0x29, 0x29, 0x29),
+            ribbon: Color32::from_rgb(0x1B, 0x2B, 0x29),
             tab_strip: window,
             nav: window,
             canvas: window,
-            panel: Color32::from_rgb(0x14, 0x14, 0x14),
-            surface: Color32::from_rgb(0x26, 0x26, 0x26),
-            border: Color32::from_rgb(0x44, 0x44, 0x44),
-            border_strong: Color32::from_rgb(0x66, 0x66, 0x66),
-            text: Color32::WHITE,
-            text_dim: Color32::from_rgb(0xC8, 0xC8, 0xC8),
-            text_disabled: Color32::from_rgb(0x70, 0x70, 0x70),
-            icon: Color32::WHITE,
-            hover: Color32::from_rgb(0x38, 0x38, 0x38),
-            pressed: Color32::from_rgb(0x4A, 0x4A, 0x4A),
-            checked: Color32::from_rgb(0x1F, 0x3B, 0x57),
-            accent: Color32::from_rgb(0x58, 0xB8, 0xFE),
-            accent_text: Color32::from_rgb(0x82, 0xC7, 0xFF),
-            on_accent: Color32::from_rgb(0x0A, 0x18, 0x26),
-            input: Color32::from_rgb(0x1F, 0x1F, 0x1F),
-            input_border: Color32::from_rgb(0x66, 0x66, 0x66),
-            group_label: Color32::from_rgb(0xAD, 0xAD, 0xAD),
+            panel: Color32::from_rgb(0x17, 0x26, 0x23),
+            surface: Color32::from_rgb(0x22, 0x28, 0x26),
+            border: Color32::from_rgb(0x34, 0x4A, 0x44),
+            border_strong: Color32::from_rgb(0x57, 0x71, 0x6A),
+            text: Color32::from_rgb(0xE6, 0xF1, 0xED),
+            text_dim: Color32::from_rgb(0xB5, 0xC8, 0xC1),
+            text_disabled: Color32::from_rgb(0x7B, 0x91, 0x89),
+            icon: Color32::from_rgb(0xC1, 0xD5, 0xCE),
+            hover: Color32::from_rgb(0x2A, 0x40, 0x3A),
+            pressed: Color32::from_rgb(0x3B, 0x55, 0x4D),
+            checked: Color32::from_rgb(0x29, 0x49, 0x40),
+            accent: Color32::from_rgb(0x88, 0xDB, 0xBF),
+            accent_text: Color32::from_rgb(0x98, 0xE7, 0xCB),
+            on_accent: Color32::from_rgb(0x10, 0x2F, 0x27),
+            input: Color32::from_rgb(0x19, 0x2A, 0x27),
+            input_border: Color32::from_rgb(0x57, 0x71, 0x6A),
+            group_label: Color32::from_rgb(0xA7, 0xBE, 0xB5),
             status_bar: window,
-            selection: Color32::from_rgb(0x44, 0x44, 0x44),
+            selection: Color32::from_rgb(0x29, 0x49, 0x40),
             find_highlight: Color32::from_rgba_unmultiplied(0xC8, 0xA8, 0x00, 0x70),
             flagged_row: Color32::from_rgb(0x3A, 0x2B, 0x2E),
             overdue: Color32::from_rgb(0xFF, 0x99, 0x99),
             off_hours: Color32::from_rgb(0x1F, 0x1F, 0x1F),
             today: Color32::from_rgb(0x1F, 0x32, 0x46),
-            menu: Color32::from_rgb(0x29, 0x29, 0x29),
+            menu: Color32::from_rgb(0x23, 0x37, 0x32),
             blue: Color32::from_rgb(0x6C, 0x9B, 0xEA),
             red: Color32::from_rgb(0xEE, 0x6A, 0x6A),
             green: Color32::from_rgb(0x5B, 0xC0, 0x8A),
@@ -878,10 +878,10 @@ mod tests {
             assert!([t.tab_strip, t.nav, t.canvas, t.status_bar].iter().all(|c| *c == t.title_bar), "{theme}: the window's own colour");
             assert_ne!(t.ribbon, t.title_bar, "{theme}: the ribbon is a band on the window");
         }
-        // No cast in the greys: the panes are neutral in both palettes.
+        // Quiet surfaces stay close to neutral; the accent carries the stronger color.
         for t in [Tokens::light(), Tokens::dark()] {
             for c in [t.ribbon, t.panel, t.surface, t.border, t.border_strong, t.hover, t.pressed, t.selection, t.menu, t.input] {
-                assert!(c.r() == c.g() && c.g() == c.b(), "{c:?}");
+                assert!(c.r().abs_diff(c.g()) <= 32 && c.b().abs_diff(c.g()) <= 32, "{c:?}");
             }
         }
     }

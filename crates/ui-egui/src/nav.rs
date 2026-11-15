@@ -9,7 +9,7 @@ use mailcraft_model::{Folder, FolderKind, Id, Mailbox};
 use serde_json::json;
 
 use crate::favorites_sync::Note;
-use crate::theme::{Tokens, bold, paint_clipped, regular};
+use crate::theme::{Tokens, bold, paint_clipped, regular, semibold};
 use crate::{MailApp, icons};
 
 /// The module bar's width, and the height each module takes in it.
@@ -66,9 +66,7 @@ pub fn module_bar(app: &mut MailApp, ui: &mut Ui) {
             let (r, resp) = ui.allocate_exact_size(vec2(RAIL_W, RAIL_PITCH), Sense::click());
             let active = app.session.view.module == m;
             if active {
-                // The module in view: a bar at the window's edge, and its icon in the accent.
-                let bar = Rect::from_min_size(pos2(r.min.x + 6.0, r.center().y - 16.0), vec2(2.0, 32.0));
-                ui.painter().rect_filled(bar, 1.0, t.accent);
+                ui.painter().rect_filled(r.shrink(6.0), 8.0, t.checked);
             } else if resp.hovered() {
                 ui.painter().rect_filled(r.shrink(6.0), 4.0, if resp.is_pointer_button_down_on() { t.pressed } else { t.hover });
             }
@@ -210,7 +208,7 @@ fn heading(app: &mut MailApp, ui: &mut Ui, id: Id, name: &str, height: f32, text
     let open = !app.ui.collapsed_folders.contains(&id);
     let y = r.min.y + text_y;
     chevron(ui.painter(), pos2(r.min.x + CHEVRON_X, y + 2.0), HEADING_CHEVRON, open, if resp.hovered() { t.accent_text } else { t.text });
-    paint_clipped(ui.painter(), pos2(r.min.x + NAME_LEFT, y), (r.width() - NAME_LEFT - 8.0).max(0.0), name, regular(HEADING_SIZE), t.text);
+    paint_clipped(ui.painter(), pos2(r.min.x + NAME_LEFT, y), (r.width() - NAME_LEFT - 8.0).max(0.0), name, semibold(HEADING_SIZE - 1.0), t.text);
     if resp.clicked() {
         let _ = app.execute("ui.toggleFolder", json!({"id": id}));
     }
@@ -234,10 +232,10 @@ fn folder_row(app: &mut MailApp, ui: &mut Ui, f: &Folder, depth: usize, has_chil
     app.hit.add("folder", f.id, r);
     let row = highlight(r);
     if selected {
-        ui.painter().rect_filled(row, 0.0, t.selection);
+        ui.painter().rect_filled(row, 5.0, t.selection);
     } else if resp.hovered() {
         // Quieter than on the ribbon: the pane is darker, and the selected row must stay the one that stands out.
-        ui.painter().rect_filled(row, 0.0, t.panel.lerp_to_gamma(t.hover, 0.7));
+        ui.painter().rect_filled(row, 5.0, t.hover);
     }
     let x = r.min.x + depth.min(MAX_INDENT_DEPTH) as f32 * INDENT;
     // The chevron has its own click target, only on a folder with something under it.
@@ -255,7 +253,7 @@ fn folder_row(app: &mut MailApp, ui: &mut Ui, f: &Folder, depth: usize, has_chil
     let mut name_end = r.max.x - COUNT_RIGHT;
     if count != Count::Nothing {
         let font = if matches!(count, Count::Unread(_)) { bold(NAME_SIZE) } else { regular(NAME_SIZE) };
-        let shown = ui.painter().text(pos2(r.max.x - COUNT_RIGHT, y), Align2::RIGHT_CENTER, count.text(), font, t.accent);
+        let shown = ui.painter().text(pos2(r.max.x - COUNT_RIGHT, y), Align2::RIGHT_CENTER, count.text(), font, t.accent_text);
         name_end = shown.min.x - 8.0;
     }
     let font = if selected { bold(NAME_SIZE) } else { regular(NAME_SIZE) };
@@ -429,18 +427,23 @@ fn sheet(painter: &Painter, r: Rect, t: &Tokens) {
 
 /// The top of the pane: the button that puts the pane away.
 fn pane_top(app: &mut MailApp, ui: &mut Ui, t: &Tokens) {
-    // The line along the pane's top, and a little air under it.
-    ui.add_space(4.0);
-    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
-    let add = Rect::from_min_max(pos2(r.min.x + HIGHLIGHT_LEFT, r.min.y), pos2(r.max.x - 30.0, r.max.y));
-    let response = ui.put(add, egui::Button::new(tl!("Add Mailbox…")).frame(false));
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
+    let button = Rect::from_center_size(pos2(r.max.x - 17.0, r.center().y), vec2(26.0, 26.0));
+    let add = button.translate(vec2(-30.0, 0.0));
+    let x = r.min.x + 16.0;
+    paint_clipped(ui.painter(), pos2(x, r.center().y), (add.min.x - x - 8.0).max(0.0), tl!("Mailboxes"), semibold(14.0), t.text);
+    let response = ui.put(add, egui::Button::new("").frame(false)).on_hover_text(tl!("Add Mailbox…"));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!("Add Mailbox…")));
+    if response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(add, 5.0, t.checked);
+    }
+    icons::paint(ui.painter(), Rect::from_center_size(add.center(), vec2(14.0, 14.0)), "plus", t.icon, t.accent);
     app.hit.add("addMailbox", 0, add);
-    if response.on_hover_text(tl!("Connect another mailbox alongside your existing accounts")).clicked()
+    if response.clicked()
         && let Err(error) = app.run("ui.dialog", json!({"name": "account"}))
     {
         app.status(error);
     }
-    let button = Rect::from_center_size(pos2(r.max.x - 14.0, r.center().y), vec2(20.0, 20.0));
     let resp = ui.interact(button, ui.id().with("hide_pane"), Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(button, 4.0, if resp.is_pointer_button_down_on() { t.pressed } else { t.hover });
@@ -460,9 +463,8 @@ pub fn folder_pane_strip(app: &mut MailApp, ui: &mut Ui) {
     egui::Panel::left("folders_hidden").exact_size(STRIP_W).resizable(false).frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |ui| {
         sheet(ui.painter(), ui.max_rect(), &t);
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-        ui.add_space(4.0);
-        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
-        let button = Rect::from_center_size(r.center(), vec2(20.0, 20.0));
+        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
+        let button = Rect::from_center_size(r.center(), vec2(26.0, 26.0));
         let resp = ui.interact(button, ui.id().with("show_pane"), Sense::click());
         if resp.hovered() {
             ui.painter().rect_filled(button, 4.0, if resp.is_pointer_button_down_on() { t.pressed } else { t.hover });
@@ -528,7 +530,7 @@ pub fn folder_pane(app: &mut MailApp, ui: &mut Ui) {
             let mut first = true;
             let mut head = |app: &mut MailApp, ui: &mut Ui, id: Id, name: &str| {
                 if std::mem::take(&mut first) {
-                    heading(app, ui, id, name, ROW_H, 7.5, false)
+                    heading(app, ui, id, name, ROW_H + 4.0, 12.0, false)
                 } else {
                     heading(app, ui, id, name, 2.0 * ROW_H, 34.5, true)
                 }

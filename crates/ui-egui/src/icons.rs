@@ -138,6 +138,11 @@ pub fn paint(p: &Painter, r: Rect, name: &str, c: Color32, accent: Color32) {
             pen.fcircle(15.5, 5.5, 3.6, a);
             pen.plus(15.5, 5.5, 2.0, Color32::WHITE);
         }
+        "newMailPrimary" => {
+            pen.envelope(2.5, 6.0, 15.5, 16.0, c);
+            pen.fcircle(15.5, 5.5, 3.6, c);
+            pen.plus(15.5, 5.5, 2.0, a);
+        }
         "read" | "markRead" | "toggleRead" => {
             pen.closed(&[(3.0, 9.0), (10.0, 4.0), (17.0, 9.0), (17.0, 16.5), (3.0, 16.5)], c);
             pen.line(&[(3.0, 9.0), (10.0, 13.5), (17.0, 9.0)]);
@@ -690,6 +695,7 @@ pub const NAMES: &[&str] = &[
     "markUnread",
     "new",
     "newMail",
+    "newMailPrimary",
     "read",
     "markRead",
     "toggleRead",
