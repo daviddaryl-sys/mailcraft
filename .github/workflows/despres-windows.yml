@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       run_protocol_tests:
-        description: Run Windows engine and network tests (leave on unless the same Rust source was already tested)
+        description: Run Windows engine, network and interface tests
         type: boolean
         default: true
 
@@ -42,31 +42,48 @@ jobs:
         run: |
           dotnet tool install --global wix --version $env:WIX_VERSION
           wix extension add -g "WixToolset.UI.wixext/$env:WIX_VERSION" "WixToolset.Util.wixext/$env:WIX_VERSION"
-      - name: Test Windows engine and network protocols
+      - name: Test Windows engine, network and interface
         if: inputs.run_protocol_tests
         shell: pwsh
         run: |
-          cargo test --locked -p mailcraft-engine -p mailcraft-net --target x86_64-pc-windows-msvc
+          cargo test --locked -p mailcraft-engine -p mailcraft-net -p mailcraft-ui-egui --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { throw 'Windows regression tests failed' }
       - name: Build and package unsigned Windows x64
         shell: pwsh
         run: ./packaging/windows/package.ps1 -Arch x64
-      - name: Install, check and uninstall the MSI (x64 only)
+      - name: Install and upgrade the x64 MSI, test the app, and uninstall
         shell: pwsh
         run: |
-          $msi = (Get-Item dist/release/*.msi).FullName
-          $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/qn', '/norestart', '/l*v', "$env:RUNNER_TEMP\install.log") -Wait -PassThru
-          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\install.log" -Tail 60; throw "install failed ($($p.ExitCode))" }
+          function Install-Msi([string] $File, [string] $Log) {
+            $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$File`"", '/qn', '/norestart', '/l*v', "`"$Log`"") -Wait -PassThru
+            if ($p.ExitCode -ne 0) { Get-Content $Log -Tail 60; throw "install failed ($($p.ExitCode))" }
+          }
+          $msi = Get-Item dist/release/*.msi
+          $registry = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+          $previous = Join-Path $env:RUNNER_TEMP 'mailcraft-previous.msi'
+          Invoke-WebRequest -Uri 'https://github.com/daviddaryl-sys/mailcraft/releases/download/v0.4.3-despres.2/mailcraft-0.4.3-windows-x64.msi' -OutFile $previous
+          if ((Get-FileHash $previous -Algorithm SHA256).Hash -ne 'cebcda0bd66a09f235fe29fd8280c61935c5b1df2ca0edd64474f1a41742eea8') {
+            throw 'previous MSI checksum does not match'
+          }
+          Install-Msi $previous (Join-Path $env:RUNNER_TEMP 'previous-install.log')
+          $old = @(Get-ItemProperty $registry | Where-Object { $_.DisplayName -eq 'MailCraft' })
+          if ($old.Count -ne 1 -or $old[0].DisplayVersion -ne '0.4.3') { throw 'previous MSI did not register version 0.4.3' }
+          Install-Msi $msi.FullName (Join-Path $env:RUNNER_TEMP 'upgrade.log')
           $dir = Join-Path $env:ProgramFiles 'MailCraft'
           foreach ($f in 'mailcraft.exe', 'mailcraft-cli.exe') { if (-not (Test-Path (Join-Path $dir $f))) { throw "$f missing in $dir" } }
-          & (Join-Path $dir 'mailcraft-cli.exe') --version
+          $reported = & (Join-Path $dir 'mailcraft-cli.exe') --version
           if ($LASTEXITCODE -ne 0) { throw 'installed CLI failed' }
+          Write-Output $reported
+          if ($msi.Name -notmatch '^mailcraft-([0-9]+\.[0-9]+\.[0-9]+)-windows-x64\.msi$') { throw 'unexpected installer filename' }
+          $version = $Matches[1]
+          if ($reported -notmatch "(?<![0-9.])$([regex]::Escape($version))(?![0-9.])") { throw 'installed CLI version does not match the MSI' }
           foreach ($f in 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'ATTRIBUTION.md') {
             if (-not (Test-Path (Join-Path $dir $f))) { throw "$f missing from installed app" }
           }
           ./packaging/windows/smoke.ps1 -AppDir $dir
-          $entry = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object { $_.DisplayName -eq 'MailCraft' }
-          if (-not $entry) { throw 'no installed-programs entry named MailCraft' }
+          $entry = @(Get-ItemProperty $registry | Where-Object { $_.DisplayName -eq 'MailCraft' })
+          if ($entry.Count -ne 1 -or $entry[0].DisplayVersion -ne $version) { throw 'upgrade did not replace the previous MailCraft installation' }
+          $entry = $entry[0]
           $entry | Format-List DisplayName, DisplayVersion, Publisher, PSChildName
           if (-not (Get-ItemProperty 'HKLM:\SOFTWARE\RegisteredApplications').MailCraft) { throw 'MailCraft is not offered as a mail program' }
           $p = Start-Process msiexec.exe -ArgumentList @('/x', $entry.PSChildName, '/qn', '/norestart') -Wait -PassThru
@@ -81,7 +98,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-sample-screenshot
-          path: ${{ runner.temp }}/mailcraft-windows-sample.png
+          path: ${{ runner.temp }}/mailcraft-windows-sample*.png
           if-no-files-found: error
           retention-days: 7
       - name: Retain binaries for packaging diagnostics
