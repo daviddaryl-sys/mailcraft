@@ -40,14 +40,11 @@ impl Client {
         })
     }
     fn allowed(&self, url: &Url) -> bool {
-        if self.base.same_server(url) || self.apple.is_some_and(|apple| apple.allows(url)) {
-            return true;
-        }
         #[cfg(test)]
         if self.trusted_test_origins.iter().any(|origin| origin.same_server(url)) {
             return true;
         }
-        false
+        self.base.same_server(url) || self.apple.is_some_and(|apple| apple.allows(url))
     }
     fn href(&self, url: &Url) -> String {
         if self.absolute { full_url(url) } else { url.path.clone() }
